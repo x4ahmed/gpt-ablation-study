@@ -1,0 +1,11 @@
+fineweb_data_small/
+fineweb_data/
+wandb/
+checkpoints/
+logit_avg_ckpts/
+tiny_ckpts/
+runs/
+.env
+*.bat
+experiments.md
+scripts/
