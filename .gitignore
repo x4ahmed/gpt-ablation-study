@@ -6,6 +6,6 @@ logit_avg_ckpts/
 tiny_ckpts/
 runs/
 .env
-*.bat
+1st_run/
 experiments.md
 scripts/
