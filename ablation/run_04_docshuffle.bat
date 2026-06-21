@@ -25,12 +25,13 @@ echo.
 echo Running document shuffle experiment...
 echo.
 python tiny/train.py ^
-  --run-name docshuffle_10M_16K ^
+  --run-name shuffle ^
   --wandb_entity i-learn ^
   --no_torch_compile ^
   --n_layer 4 --n_embd 512 --n_head 8 ^
-  --device-batch-size 2 --num-epochs 16 ^
+  --device-batch-size 2 --num-epochs 20 ^
   --update-ema-every 0 --swa-last-epochs 0 ^
+  --lr_multiplier 0.6 --weight-decay 0.8 --dropout 0.1 ^
   --input_bin fineweb_data/fineweb_train.pt ^
   --input_val_bin fineweb_data/fineweb_val.pt ^
   --total-batch-size 16384
