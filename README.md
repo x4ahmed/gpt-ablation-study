@@ -49,10 +49,10 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 | Run          | Val Loss | Best Val Loss | Status  | W&B Link |
 | ------------ | -------- | ------------- | ------- | -------- |
 | Baseline     | 6.1553   | 6.1553        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/atcc23zv) |
-| LR High      | —        | —             | Pending | —        |
-| LR Low       | —        | —             | Pending | —        |
-| Shuffle      | —        | —             | Pending | —        |
-| WD Low       | —        | —             | Pending | —        |
+| LR High      | 6.7309   | 6.7309        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/bkgu7cnh) |
+| LR Low       | 6.0326   | 6.0326        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/rabskmre) |
+| Shuffle      | 6.1694   | 6.1694        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/gzl6bjst) |
+| WD Low       | 6.1166   | 6.1166        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/b9w7qzbx) |
 | WD High      | —        | —             | Pending | —        |
 | Dropout Low  | —        | —             | Pending | —        |
 | Dropout High | —        | —             | Pending | —        |
