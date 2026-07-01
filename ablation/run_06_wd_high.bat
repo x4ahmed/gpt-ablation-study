@@ -31,7 +31,7 @@ python tiny/train.py ^
   --n_layer 4 --n_embd 512 --n_head 8 ^
   --device-batch-size 2 --num-epochs 20 ^
   --no-doc-shuffle --update-ema-every 0 --swa-last-epochs 0 ^
-  --lr_multiplier 0.6 --weight-decay 1.2 --dropout 0.1 ^
+  --lr_multiplier 0.6 --weight-decay 1.2 --wd-mid 0.15 --wd-end 1.875 --dropout 0.1 ^
   --input_bin fineweb_data/fineweb_train.pt ^
   --input_val_bin fineweb_data/fineweb_val.pt ^
   --total-batch-size 16384
