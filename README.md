@@ -2,7 +2,7 @@
 
 This repository conducts a systematic ablation study on a ~66M parameter GPT-style model trained on 10M FineWeb tokens. The goal is to isolate the impact of key training hyperparameters—learning rate, weight decay, dropout, and document shuffling—by changing exactly one variable per run while holding all other recipe settings constant.
 
-## Baseline Hyperparameters (2nd Run)
+## Baseline Hyperparameters
 
 | Hyperparameter        | Value                        |
 | --------------------- | ---------------------------- |
@@ -11,6 +11,8 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 | Sequence Length       | 2048                         |
 | Total Batch Size      | 16,384                       |
 | Device Batch Size     | 2                            |
+| Grad Accum Steps      | 4                            |
+| Optimizer Steps/Epoch | ~610                         |
 | Epochs                | 20                           |
 | Architecture          | 4 layers, 512 embed dim, 8 heads |
 | Learning Rate (multiplier) | 0.6                     |
@@ -52,8 +54,8 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 | LR High      | 6.7309   | 6.7309        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/bkgu7cnh) |
 | LR Low       | 6.0326   | 6.0326        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/rabskmre) |
 | Shuffle      | 6.1694   | 6.1694        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/gzl6bjst) |
-| WD Low       | —        | —             | Pending | —        |
-| WD High      | —        | —             | Pending | —        |
+| WD Low       | 5.7697   | 5.7697        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/nk5j7ng1) |
+| WD High      | 6.3105   | 6.3105        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/6pxhm623) |
 | Dropout Low  | —        | —             | Pending | —        |
 | Dropout High | 6.2938   | 6.2938        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/hmcn70i4) |
 
@@ -61,8 +63,8 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 
 The ablation runs use a significantly reduced configuration compared to the
 full slowrun leaderboard recipe, constrained by a single 4 GB GPU. The
-training recipe (architecture, optimizer, regularization) is identical
-between the two — only the scale and a few hardware-related defaults differ.
+training recipe (architecture, regularization) is identical between the two
+— only the scale, optimizer, and a few hardware-related defaults differ.
 This explains why absolute val loss (~6.0) is higher than leaderboard results
 (~4.0) — the difference is driven by model capacity and data budget, not
 recipe modifications.
@@ -80,7 +82,7 @@ recipe modifications.
 | Key offset | Partial, long-window layers | Partial, long-window layers | — |
 | U-Net skips | Yes, learnable weights | Yes, learnable weights | — |
 | Value residuals | ResFormer, alternating layers | ResFormer, alternating layers | — |
-| Optimizer | Muon (matrices) + AdamW (embed/scalars) | Muon (matrices) + AdamW (embed/scalars) | — |
+| Optimizer | Muon (matrices) + AdamW (embed/scalars) | AdamW (all params) | Single-GPU fallback bypasses Muon; all params use AdamW |
 | Weight decay | 3-phase: hold → decay → ramp | 3-phase: hold → decay → ramp | — |
 | EMA | Yes | Disabled (`--update-ema-every 0`) | Save memory/time on single GPU |
 | SWA | Yes, last 4 epochs | Disabled (`--swa-last-epochs 0`) | Save memory/time on single GPU |
