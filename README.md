@@ -44,7 +44,7 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 | OS            | Windows                                      |
 | PyTorch       | CUDA 12.8 build                              |
 | torch.compile | Disabled (`--no_torch_compile`)              |
-| Runtime       | ~5 min/epoch on CUDA                         |
+| Runtime       | ~26 min/epoch (~8.8 hours/run, avg across 7 runs) |
 
 ## Results
 
@@ -106,3 +106,51 @@ to `--weight-decay` so the schedule shape is preserved across all WD runs.
 | 1 — Hold | 0–2 | 0.8 | 0.2 | 1.2 |
 | 2 — Decay | 2–8 | 0.8 → 0.1 | 0.2 → 0.025 | 1.2 → 0.15 |
 | 3 — Ramp | 8–20 | 0.1 → 1.25 | 0.025 → 0.3125 | 0.15 → 1.875 |
+
+## H100 Run Setup
+
+After the ablation study, the best configuration will be re-run at full
+leaderboard scale on a rented 8× H100 node (e.g. Lambda Labs). The
+`h100_runs/` folder contains standalone scripts with the full-scale defaults
+(16 layers, 1024 dim, 524K batch, Muon optimizer, EMA + SWA enabled).
+
+### Prerequisites
+
+- **HF token**: Create a read token at https://huggingface.co/settings/tokens
+- **W&B API key**: Get it from https://wandb.ai/authorize
+
+### Setup sequence
+
+```bash
+# 1. Clone and enter the h100_runs directory
+git clone https://github.com/x4ahmed/gpt-ablation-study.git
+cd gpt-ablation-study/h100_runs
+
+# 2. Install dependencies
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install numpy tiktoken wandb datasets tqdm kernels
+
+# 3. Set HF token (persists across sessions)
+echo 'export HF_TOKEN=hf_your_token_here' >> ~/.bashrc
+source ~/.bashrc
+
+# 4. Login to W&B (prompts for API key, saves to ~/.netrc)
+wandb login
+
+# 5. Prepare data (100M train tokens, 10M val tokens — ~10-20 min)
+python prepare_data.py
+
+# 6. Train (8 GPUs, Muon optimizer, EMA + SWA enabled)
+torchrun --standalone --nproc_per_node=8 train.py \
+  --run-name h100_baseline \
+  --wandb_entity i-learn \
+  --no-doc-shuffle
+```
+
+### Notes
+
+- `torch.compile` is always enabled on H100 (Linux/Inductor works fine)
+- Muon optimizer is used for matrix weights, AdamW for embeddings/scalars
+- EMA (every 10 steps) and SWA (last 4 epochs) are enabled by default
+- Results, checkpoints, and model are saved to `runs/<run_name>/`
+- Monitor live metrics at https://wandb.ai/i-learn/slowrun
