@@ -56,7 +56,7 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 | Shuffle      | 6.1694   | 6.1694        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/gzl6bjst) |
 | WD Low       | 5.7697   | 5.7697        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/nk5j7ng1) |
 | WD High      | 6.3105   | 6.3105        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/6pxhm623) |
-| Dropout Low  | —        | —             | Pending | —        |
+| Dropout Low  | 6.1938   | 6.1938        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/j2ad0xji) |
 | Dropout High | 6.2938   | 6.2938        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/hmcn70i4) |
 
 ### Leaderboard vs Ablation Baseline
@@ -82,6 +82,7 @@ recipe modifications.
 | Key offset | Partial, long-window layers | Partial, long-window layers | — |
 | U-Net skips | Yes, learnable weights | Yes, learnable weights | — |
 | Value residuals | ResFormer, alternating layers | ResFormer, alternating layers | — |
+| Dataloader | Chunk-based (pre-packed sequences) | Document-based (flat tokens + doc boundaries) | Document-based supports per-epoch doc reshuffling; chunk-based is frozen at preprocessing |
 | Optimizer | Muon (matrices) + AdamW (embed/scalars) | AdamW (all params) | Single-GPU fallback bypasses Muon; all params use AdamW |
 | Weight decay | 3-phase: hold → decay → ramp | 3-phase: hold → decay → ramp | — |
 | EMA | Yes | Disabled (`--update-ema-every 0`) | Save memory/time on single GPU |
@@ -106,6 +107,19 @@ to `--weight-decay` so the schedule shape is preserved across all WD runs.
 | 1 — Hold | 0–2 | 0.8 | 0.2 | 1.2 |
 | 2 — Decay | 2–8 | 0.8 → 0.1 | 0.2 → 0.025 | 1.2 → 0.15 |
 | 3 — Ramp | 8–20 | 0.1 → 1.25 | 0.025 → 0.3125 | 0.15 → 1.875 |
+
+## Scaled Experiment Results
+
+After the ablation study, the best configuration (WD Low: `lr_multiplier=0.6,
+weight_decay=0.2, dropout=0.1`) will be re-run at full leaderboard scale on
+a rented H100 node. The `h100_runs/` folder contains standalone scripts with
+the full-scale defaults (16 layers, 1024 dim, 524K batch, Muon optimizer,
+EMA + SWA enabled).
+
+| Run | Setup | Val Loss | Status | W&B Link |
+| --- | --- | --- | --- | --- |
+| H100 Baseline | Full leaderboard config (16L, 1024d, WD=0.8, lr=0.6) | — | Pending | — |
+| H100 Best Ablation | Full leaderboard config + best ablation params (WD=0.2) | — | Pending | — |
 
 ## H100 Run Setup
 
