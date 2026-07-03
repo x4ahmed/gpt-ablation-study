@@ -10,3 +10,5 @@ runs/*/model.pt
 1st_run/
 experiments.md
 scripts/
+h100_runs/runs/*/model.pt
+h100_runs/fineweb_data/

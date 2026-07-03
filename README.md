@@ -110,16 +110,23 @@ to `--weight-decay` so the schedule shape is preserved across all WD runs.
 
 ## Scaled Experiment Results
 
-After the ablation study, the best configuration (WD Low: `lr_multiplier=0.6,
-weight_decay=0.2, dropout=0.1`) will be re-run at full leaderboard scale on
-a rented H100 node. The `h100_runs/` folder contains standalone scripts with
-the full-scale defaults (16 layers, 1024 dim, 524K batch, Muon optimizer,
-EMA + SWA enabled).
+After the ablation study, the best configuration (WD Low: `weight_decay=0.2,
+dropout=0.1`) was re-run at full leaderboard scale on a rented H100 node,
+using the leaderboard default `lr_multiplier=0.8`. The `h100_runs/` folder
+contains standalone scripts with the full-scale defaults (16 layers, 1024
+dim, 524K batch, Muon optimizer, EMA + SWA enabled).
 
-| Run | Setup | Val Loss | Status | W&B Link |
-| --- | --- | --- | --- | --- |
-| H100 Baseline | 16L, 1024d, 100M tokens, WD=0.8, lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | — | Pending | — |
-| H100 Best Ablation | 16L, 1024d, 100M tokens, WD=0.2 (scaled), lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | — | Pending | — |
+| Run | Setup | Val Loss | Best Val Loss | Status | W&B Link |
+| --- | --- | --- | --- | --- | --- |
+| H100 Baseline | 16L, 1024d, 100M tokens, WD=0.8, lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | 3.3484 | 3.3343 | Done | [View](https://wandb.ai/i-learn/slowrun/runs/vryw9bxv) |
+| H100 Best Ablation | 16L, 1024d, 100M tokens, WD=0.2 (scaled), lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | 3.7511 | 3.4929 | Done | [View](https://wandb.ai/i-learn/slowrun/runs/71vfhncu) |
+
+**Observation:** At full scale, WD=0.8 (baseline) outperformed WD=0.2. This is
+the opposite of the ablation study, where WD Low (5.7697) beat the baseline
+(6.1553). This confirms that the optimal weight decay at small scale (66M
+params, 10M tokens, AdamW) does not transfer to full scale (317M params, 100M
+tokens, Muon optimizer). The Muon optimizer + larger model + more data
+benefits from higher weight decay.
 
 ## H100 Run Setup
 
