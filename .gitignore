@@ -4,7 +4,8 @@ wandb/
 checkpoints/
 logit_avg_ckpts/
 tiny_ckpts/
-runs/
+runs/*/train.py
+runs/*/model.pt
 .env
 1st_run/
 experiments.md
