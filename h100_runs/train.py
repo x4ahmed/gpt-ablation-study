@@ -1,12 +1,10 @@
 """
 Train a language model on ~100M tokens with val loss evaluation.
-H100 version: full slowrun leaderboard configuration (16 layers, 1024 dim, 8 GPUs).
-Uses Muon optimizer for matrices + AdamW for embeddings/scalars.
-EMA and SWA are enabled by default.
+Code is based on Nanochat (https://github.com/karpathy/nanochat), with modifications to support the slowrun setting.
+Made for the Tiny Track of the NanoGPT Slowrun benchmark.
 
 Usage:
-    python prepare_data.py
-    torchrun --standalone --nproc_per_node=8 train.py
+    torchrun --standalone --nproc_per_node=8 tiny/train.py
 """
 
 import os
@@ -39,18 +37,21 @@ _script_start = time.time()
 # CLI arguments
 # =============================================================================
 
-parser = argparse.ArgumentParser(description="Train GPT model (H100 full-scale)")
+parser = argparse.ArgumentParser(description="Train GPT model")
 parser.add_argument("--device-batch-size", type=int, default=32)
 parser.add_argument("--num-epochs", type=int, default=16)
 parser.add_argument("--patience", type=int, default=-1)
 parser.add_argument("--run-name", type=str, default=None,
-                    help="Run name under runs/ (default: timestamp)")
+                    help="Run name under runs/ (default: random 6-char string)")
 parser.add_argument("--scalar-lr", type=float, default=0.25)
 parser.add_argument("--matrix-lr", type=float, default=0.04)
 parser.add_argument("--embedding-lr", type=float, default=0.15)
 parser.add_argument("--unembedding-lr", type=float, default=0.001)
 parser.add_argument("--weight-decay", type=float, default=0.8)
 # WD follows a 3-phase schedule: hold → decay → ramp
+#   [0, wd-phase1-epoch]:          hold at --weight-decay
+#   [wd-phase1-epoch, wd-phase2-epoch]: decay to --wd-mid
+#   [wd-phase2-epoch, num-epochs]:      ramp up to --wd-end
 parser.add_argument("--wd-phase1-epoch", type=int, default=2)
 parser.add_argument("--wd-phase2-epoch", type=int, default=8)
 parser.add_argument("--wd-mid", type=float, default=0.1)
@@ -61,7 +62,7 @@ parser.add_argument("--save-result", type=str, default="")
 parser.add_argument("--n_layer", type=int, default=16)
 parser.add_argument("--n_head", type=int, default=8)
 parser.add_argument("--n_embd", type=int, default=1024)
-parser.add_argument("--lr_multiplier", type=float, default=0.6)
+parser.add_argument("--lr_multiplier", type=float, default=0.8)
 parser.add_argument("--input_bin", type=str, default=None)
 parser.add_argument("--input_val_bin", type=str, default=None)
 parser.add_argument("--output_json", type=str, default=None)
@@ -85,17 +86,17 @@ if args.output_json and not args.save_result:
 # Hyperparameters
 # =============================================================================
 
-# Architecture — full slowrun leaderboard scale
-DEPTH = args.n_layer if args.n_layer is not None else 16
-N_EMBD = args.n_embd if args.n_embd is not None else 1024
-N_HEAD = args.n_head if args.n_head is not None else 8
+# Architecture
+DEPTH = args.n_layer if args.n_layer is not None else 12
+N_EMBD = args.n_embd if args.n_embd is not None else 768
+N_HEAD = args.n_head if args.n_head is not None else 6
 HEAD_DIM = N_EMBD // N_HEAD
 MAX_SEQ_LEN = 2048
 WINDOW_PATTERN = "SSSL"
 TOTAL_BATCH_SIZE = args.total_batch_size
 EVAL_TOKENS = 10_000_000
 DATA_DIR = "fineweb_data"
-BOS_ID = 50256  # 
+BOS_ID = 50256  # <|endoftext|>
 RUNS_DIR = "runs"
 
 # Base optimizer hyperparameters
@@ -113,7 +114,7 @@ SCALAR_LR = BASE_SCALAR_LR * _lr_mult
 
 WEIGHT_DECAY = args.weight_decay
 ADAM_BETAS = (0.8, 0.95)
-WARMUP_RATIO = 0.05
+WARMUP_RATIO = 0.0
 WARMDOWN_RATIO = args.warmdown_ratio
 FINAL_LR_FRAC = 0.0
 
@@ -160,6 +161,7 @@ def resolve_run_dir(run_name):
 # =============================================================================
 # Flash Attention (FA3 on Hopper, SDPA fallback elsewhere)
 # =============================================================================
+
 def _load_fa3():
     if not torch.cuda.is_available():
         return None
@@ -169,12 +171,8 @@ def _load_fa3():
             return None
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         from kernels import get_kernel
-        return get_kernel('kernels-community/flash-attn3', version=1)
-    except ImportError:
-        print0("Warning: kernels package not found. Install with: pip install -U kernels")
-        return None
-    except Exception as e:
-        print0(f"Warning: Failed to load FA3 kernel: {e}")
+        return get_kernel('varunneal/flash-attention-3').flash_attn_interface
+    except Exception:
         return None
 
 _fa3 = _load_fa3()
@@ -622,18 +620,7 @@ class DistMuonAdamW(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self):
-        # This version requires distributed training (torchrun with >= 2 GPUs).
-        # Muon optimizer is used for matrix params, AdamW for embeddings/scalars.
-        if dist.is_available() and dist.is_initialized():
-            rank, world_size = dist.get_rank(), dist.get_world_size()
-        else:
-            _, rank, _, world_size = get_dist_info()
-
-        assert world_size > 1, (
-            "H100 train.py requires torchrun with multiple GPUs. "
-            "Use: torchrun --standalone --nproc_per_node=8 train.py"
-        )
-
+        rank, world_size = dist.get_rank(), dist.get_world_size()
         reduce_infos = []
         for group in self.param_groups:
             if group['kind'] == 'adamw': reduce_infos.append(self._reduce_adamw(group, world_size))
@@ -646,7 +633,6 @@ class DistMuonAdamW(torch.optim.Optimizer):
             info["future"].wait()
             if info.get("params") is not None:
                 torch._foreach_copy_(info["params"], list(info["stacked_params"][:len(info["params"])].unbind(0)))
-
 # =============================================================================
 # Dataloader: BOS-aligned best-fit packing
 # =============================================================================
@@ -679,8 +665,6 @@ class DataLoader:
         self.seq_size = T + 1
         self.doc_shuffle = doc_shuffle
         self.epoch = 1
-        # Track last printed epoch to avoid duplicate "Starting epoch" lines
-        self._last_printed_epoch = None
         self._build_batches()
 
     def _build_batches(self):
@@ -708,10 +692,7 @@ class DataLoader:
 
     def _next_epoch(self):
         self.epoch += 1
-        # Avoid printing the same "Starting epoch" message more than once
-        if self._last_printed_epoch != self.epoch:
-            print0(f"Starting epoch {self.epoch}")
-            self._last_printed_epoch = self.epoch
+        print0(f"Starting epoch {self.epoch}")
         if self.doc_shuffle:
             g = torch.Generator()
             g.manual_seed(self.epoch)
@@ -743,16 +724,8 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     total_loss = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())
     total_tokens = torch.tensor(0, dtype=torch.int64, device=model.get_device())
     batch_iter = iter(batches)
-    initial_epoch = None
     for _ in range(steps):
-        x, y, epoch = next(batch_iter)
-        # If the validation loader wrapped to a new epoch, stop to avoid
-        # repeatedly evaluating the same data when the requested `steps`
-        # exceed the available validation set size.
-        if initial_epoch is None:
-            initial_epoch = epoch
-        elif epoch != initial_epoch:
-            break
+        x, y, _ = next(batch_iter)
         loss2d = model(x, y, loss_reduction='none').view(-1)
         y = y.view(-1)
         mask = y != -1
@@ -799,20 +772,9 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 gpu_peak_flops = float('inf')
 if device_type == "cuda":
     gpu_name = torch.cuda.get_device_name(0).lower()
-    if "h100" in gpu_name:
-        gpu_peak_flops = 989e12
-    elif "a100" in gpu_name:
-        gpu_peak_flops = 312e12
-    elif "4090" in gpu_name:
-        gpu_peak_flops = 165.2e12
-    else:
-        props = torch.cuda.get_device_properties(device)
-        clock_rate = getattr(props, "clock_rate", 0)
-        if clock_rate:
-            gpu_peak_flops = props.multi_processor_count * 128 * 2 * clock_rate * 1e3
-        else:
-            gpu_peak_flops = props.multi_processor_count * 128 * 2 * 1.5e9
-        print0(f"Using fallback GPU peak FLOPs for {gpu_name}: {gpu_peak_flops:.1e}")
+    if "h100" in gpu_name: gpu_peak_flops = 989e12
+    elif "a100" in gpu_name: gpu_peak_flops = 312e12
+    elif "4090" in gpu_name: gpu_peak_flops = 165.2e12
 
 # FA3 status
 if _fa3 is not None:
@@ -882,7 +844,7 @@ encoder = tiktoken.get_encoding("gpt2")
 vocab_size = encoder.n_vocab  # 50257
 print0(f"Vocab size: {vocab_size:,}")
 
-eot_id = encoder._special_tokens['']
+eot_id = encoder._special_tokens['<|endoftext|>']
 token_bytes_list = []
 for i in range(vocab_size):
     if i == eot_id:
@@ -907,10 +869,9 @@ num_flops_per_token = model.estimate_flops()
 print0(f"Parameters: {param_counts:,} (transformer: {transformer_params:,}, value_embeds: {ve_params:,}, lm_head: {lm_head_params:,}, other: {other_params:,})")
 print0(f"FLOPs per token: {num_flops_per_token:e}")
 
-# Compile — always enabled on H100 (Linux/Inductor works fine)
+# Compile
 orig_model = model
 model = torch.compile(model, dynamic=False)
-print0("torch.compile enabled")
 
 # Optimizer
 optimizer = model.setup_optimizer()
@@ -927,16 +888,13 @@ x, y, current_epoch = next(train_loader)
 tokens_per_fwdbwd = args.device_batch_size * MAX_SEQ_LEN * ddp_world_size
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
-if grad_accum_steps > train_loader.num_steps:
-    print0(f"Adjusting grad_accum_steps from {grad_accum_steps} to train epoch length {train_loader.num_steps}")
-    grad_accum_steps = train_loader.num_steps
 num_iterations = round(TOKENS_PER_EPOCH * args.num_epochs / TOTAL_BATCH_SIZE)  # estimate for LR schedule
 # Convert epoch boundaries to steps (must happen after num_iterations is known)
 wd_phase1_end_step = round(args.wd_phase1_epoch / args.num_epochs * num_iterations)
 wd_phase2_end_step = round(args.wd_phase2_epoch / args.num_epochs * num_iterations)
 print0(f"Batch size: {TOTAL_BATCH_SIZE:,} tokens, grad accum: {grad_accum_steps} steps")
-print0(f"Training set: {TOKENS_PER_EPOCH:,} tokens per epoch ({train_loader.num_steps:,} micro-batches per epoch, ~{train_loader.num_steps // grad_accum_steps} optimizer steps per epoch)")
-print0(f"Training for {args.num_epochs} epoch(s) (~{num_iterations} optimizer steps estimated)")
+print0(f"Training for {args.num_epochs} epoch(s) (~{num_iterations} steps estimated)")
+print0(f"Eval set: {EVAL_TOKENS:,} tokens")
 
 # Schedulers
 def get_lr_multiplier(it):
@@ -958,12 +916,7 @@ min_val_loss = float("inf")
 epochs_without_improvement = 0
 smooth_train_loss = 0
 total_training_time = 0
-# Compute eval budget from the actual validation loader size (one full pass)
-val_tokens_per_batch = args.device_batch_size * MAX_SEQ_LEN * ddp_world_size
-val_total_tokens = build_val_loader().total_tokens
-EVAL_TOKENS = min(EVAL_TOKENS, val_total_tokens)
-eval_steps = EVAL_TOKENS // val_tokens_per_batch
-print0(f"Eval set: {EVAL_TOKENS:,} tokens ({eval_steps:,} steps)")
+eval_steps = EVAL_TOKENS // (args.device_batch_size * MAX_SEQ_LEN * ddp_world_size)
 steps_per_epoch = num_iterations / args.num_epochs
 param_ema_beta = args.ema_decay_per_epoch ** (args.update_ema_every / steps_per_epoch) if args.update_ema_every > 0 else 0
 ema_params = [torch.zeros_like(p) for p in model.parameters()] if args.update_ema_every > 0 else None
@@ -971,7 +924,6 @@ ema_params = [torch.zeros_like(p) for p in model.parameters()] if args.update_em
 wall_clock_start = time.time()
 _swa_start_step = (num_iterations - args.swa_last_epochs * steps_per_epoch) if args.swa_last_epochs > 0 else -1
 late_ckpt_paths = []
-stop_training = False
 
 # Initial val evaluation
 model.eval()
@@ -995,10 +947,6 @@ while current_epoch <= args.num_epochs:
         train_loss = loss.detach()
         (loss / grad_accum_steps).backward()
         x, y, epoch = next(train_loader)
-
-        if epoch > args.num_epochs:
-            stop_training = True
-            break
 
     # Update optimizer
     lrm = get_lr_multiplier(step)
@@ -1040,17 +988,14 @@ while current_epoch <= args.num_epochs:
     debiased = smooth_train_loss / (1 - ema_beta**step)
     pct = 100 * step / num_iterations
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
+    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / (gpu_peak_flops * ddp_world_size)
     if step > 3:
         total_training_time += dt
     steps_done = step - 3
     eta_str = f" | eta: {(num_iterations - step) * total_training_time / steps_done / 60:.1f}m" if steps_done > 0 else ""
-    # MFU: model FLOPs utilization (% of theoretical GPU peak)
-    mfu = 0.0
-    if device_type == "cuda" and gpu_peak_flops not in (float('inf'), 0.0):
-        mfu = 100.0 * num_flops_per_token * tok_per_sec / gpu_peak_flops
-    print0(f"step {step:05d} ({pct:.2f}%) | loss: {debiased:.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f}%{eta_str}")
+    print0(f"step {step:05d} ({pct:.2f}%) | loss: {debiased:.6f} | dt: {dt*1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f}%{eta_str}")
     log_dict = {"step": step, "train/loss": debiased, "train/tokens_per_sec": tok_per_sec}
-    if mfu > 0.0:
+    if gpu_peak_flops not in (float('inf'), 0.0):
         log_dict["train/mfu"] = mfu
     wandb_run.log(log_dict)
 
@@ -1091,15 +1036,10 @@ while current_epoch <= args.num_epochs:
         model.train()
         current_epoch = epoch
         epoch_start = time.time()
-        if current_epoch > args.num_epochs:
-            stop_training = True
-            break
 
     # GC management
     if step == 1:
         gc.collect(); gc.freeze(); gc.disable()
-    if stop_training:
-        break
 
 # Final EMA evaluation
 if ema_params is not None:
@@ -1145,11 +1085,11 @@ if len(late_ckpt_paths) >= 2:
     if avg_loss < min_val_loss:
         min_val_loss, min_val_bpb = avg_loss, avg_bpb
 
+# Summary
 run_time = time.time() - wall_clock_start
 print0(f"Total run time: {run_time:.2f}s ({run_time/60:.2f}m)")
 wandb_run.log({"run/total_time": run_time})
 
-# Summary
 wall_clock_time = time.time() - wall_clock_start
 print0(f"Wall clock time: {wall_clock_time/60:.2f}m")
 print0(f"Peak memory: {get_max_memory() / 1024 / 1024:.2f} MiB")

@@ -118,8 +118,8 @@ EMA + SWA enabled).
 
 | Run | Setup | Val Loss | Status | W&B Link |
 | --- | --- | --- | --- | --- |
-| H100 Baseline | Full leaderboard config (16L, 1024d, WD=0.8, lr=0.6) | — | Pending | — |
-| H100 Best Ablation | Full leaderboard config + best ablation params (WD=0.2) | — | Pending | — |
+| H100 Baseline | 16L, 1024d, 100M tokens, WD=0.8, lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | — | Pending | — |
+| H100 Best Ablation | 16L, 1024d, 100M tokens, WD=0.2 (scaled), lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | — | Pending | — |
 
 ## H100 Run Setup
 

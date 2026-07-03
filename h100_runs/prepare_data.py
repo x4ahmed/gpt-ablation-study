@@ -1,6 +1,5 @@
 """
 Preprocess FineWeb into pre-tokenized train/val splits using the GPT-2 tokenizer.
-H100 version: defaults to 100M train tokens, 10M val tokens (full leaderboard scale).
 
 Usage:
     python prepare_data.py
@@ -25,7 +24,7 @@ TRAIN_SHUFFLE_SEED = 43
 
 def tokenize_documents(dataset_iter, encoder, token_budget):
     """Tokenize documents from an iterator, recording document boundaries."""
-    bos_id = encoder._special_tokens[""]
+    bos_id = encoder._special_tokens["<|endoftext|>"]
     tokens = []
     doc_starts = []
     pbar = tqdm(total=token_budget, unit="tok")
@@ -92,9 +91,9 @@ def verify_hash(filepath):
         print(f"  Hash OK for {basename}: {actual}")
 
 
-def preprocess(train_tokens, val_tokens, local_dir, skip_verify=False):
+def preprocess(train_tokens, val_tokens, local_dir):
     encoder = tiktoken.get_encoding("gpt2")
-    bos_id = encoder._special_tokens[""]
+    bos_id = encoder._special_tokens["<|endoftext|>"]
 
     print(f"{'='*60}")
     print(f"Preprocessing FineWeb with GPT-2 tokenizer")
@@ -129,11 +128,8 @@ def preprocess(train_tokens, val_tokens, local_dir, skip_verify=False):
     write_datafile(train_path, train_tokens_arr, train_doc_starts, bos_id, TRAIN_SHUFFLE_SEED)
 
     print()
-    if not skip_verify:
-        verify_hash(val_path)
-        verify_hash(train_path)
-    else:
-        print(f"Skipping checksum verification for files in {local_dir}/")
+    verify_hash(val_path)
+    verify_hash(train_path)
 
     print(f"\nDone! Files saved to {local_dir}/")
 
@@ -143,12 +139,10 @@ if __name__ == "__main__":
     parser.add_argument("--train_tokens", type=int, default=100_000_000)
     parser.add_argument("--val_tokens", type=int, default=10_000_000)
     parser.add_argument("--local_dir", type=str, default="fineweb_data")
-    parser.add_argument("--skip-verify", action="store_true", help="Skip checksum verification of generated files")
     args = parser.parse_args()
 
     preprocess(
         train_tokens=args.train_tokens,
         val_tokens=args.val_tokens,
         local_dir=args.local_dir,
-        skip_verify=getattr(args, 'skip_verify', False),
     )
