@@ -1,5 +1,5 @@
 @echo off
-cd /d "%~dp0\.."
+cd /d "%~dp0\..\.."
 set KMP_DUPLICATE_LIB_OK=TRUE
 set USE_LIBUV=0
 call scripts\load_env.cmd
@@ -11,7 +11,7 @@ if "%HF_TOKEN%"=="" (
 REM Document shuffle ablation
 if not exist fineweb_data\fineweb_train.pt (
   echo Preparing data in fineweb_data...
-  python prepare_data.py --train_tokens 10000000 --val_tokens 1000000 --local_dir fineweb_data --skip-verify
+  python adam_runs/prepare_data.py --train_tokens 10000000 --val_tokens 1000000 --local_dir fineweb_data --skip-verify
   if errorlevel 1 (
     echo prepare_data failed. Exiting.
     exit /b 1
@@ -24,7 +24,7 @@ if not exist fineweb_data\fineweb_train.pt (
 echo.
 echo Running document shuffle experiment...
 echo.
-python tiny/train.py ^
+python adam_runs/train.py ^
   --run-name shuffle ^
   --wandb_entity i-learn ^
   --no_torch_compile ^
