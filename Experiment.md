@@ -18,7 +18,7 @@ establish a fair comparison with the H100 baseline run.
 | Grad Accum Steps      | 4                            |
 | Optimizer Steps/Epoch | ~610                         |
 | Epochs                | 16                           |
-| Architecture          | 4 layers, 512 embed dim, 8 heads |
+| Architecture          | 4 layers, 512 embed dim, 8 heads (~66M params) |
 | Learning Rate (multiplier) | 0.8                     |
 | Weight Decay          | 0.8                          |
 | Dropout               | 0.1                          |
