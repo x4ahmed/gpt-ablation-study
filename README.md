@@ -1,6 +1,10 @@
-# GPT Ablation Study
+# Muon Optimizer Ablation Study
 
-This repository conducts a systematic ablation study on a ~66M parameter GPT-style model trained on 10M FineWeb tokens. The goal is to isolate the impact of key training hyperparameters—learning rate, weight decay, dropout, and document shuffling—by changing exactly one variable per run while holding all other recipe settings constant.
+This experiment conducts a systematic ablation study using the **Muon optimizer**
+(for matrices) + **AdamW** (for embeddings/scalars), matching the full-scale
+leaderboard recipe. The goal is to determine whether hyperparameter findings
+from the AdamW ablation study transfer when using the Muon optimizer, and to
+establish a fair comparison with the H100 baseline run.
 
 ## Baseline Hyperparameters
 
@@ -13,25 +17,29 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 | Device Batch Size     | 2                            |
 | Grad Accum Steps      | 4                            |
 | Optimizer Steps/Epoch | ~610                         |
-| Epochs                | 20                           |
-| Architecture          | 4 layers, 512 embed dim, 8 heads |
-| Learning Rate (multiplier) | 0.6                     |
+| Epochs                | 16                           |
+| Architecture          | 4 layers, 512 embed dim, 8 heads (~66M params) |
+| Learning Rate (multiplier) | 0.8                     |
 | Weight Decay          | 0.8                          |
 | Dropout               | 0.1                          |
-| Document Shuffle      | Off                          |
+| Document Shuffle      | On                           |
+| Optimizer             | Muon (matrices) + AdamW (embed/scalars) |
+| EMA                   | Every 10 steps                |
+| SWA                   | Last 4 epochs                 |
+| Warmup Ratio          | 0.0                           |
 
 ## Experiment Setup
 
 | Run          | Train Tokens | Val Tokens | LR  | WD  | Dropout | Shuffle |
 | ------------ | ------------ | ---------- | --- | --- | ------- | ------- |
-| Baseline     | 10M          | 1M         | 0.6 | 0.8 | 0.1     | Off     |
-| LR High      | 10M          | 1M         | 1.0 | 0.8 | 0.1     | Off     |
-| LR Low       | 10M          | 1M         | 0.4 | 0.8 | 0.1     | Off     |
-| Shuffle      | 10M          | 1M         | 0.6 | 0.8 | 0.1     | On      |
-| WD Low       | 10M          | 1M         | 0.6 | 0.2 | 0.1     | Off     |
-| WD High      | 10M          | 1M         | 0.6 | 1.2 | 0.1     | Off     |
-| Dropout Low  | 10M          | 1M         | 0.6 | 0.8 | 0.0     | Off     |
-| Dropout High | 10M          | 1M         | 0.6 | 0.8 | 0.2     | Off     |
+| Baseline     | 10M          | 1M         | 0.8 | 0.8 | 0.1     | On      |
+| LR High      | 10M          | 1M         | 1.0 | 0.8 | 0.1     | On      |
+| LR Low       | 10M          | 1M         | 0.4 | 0.8 | 0.1     | On      |
+| WD Low       | 10M          | 1M         | 0.8 | 0.2 | 0.1     | On      |
+| WD High      | 10M          | 1M         | 0.8 | 1.2 | 0.1     | On      |
+| Dropout Low  | 10M          | 1M         | 0.8 | 0.8 | 0.0     | On      |
+| Dropout High | 10M          | 1M         | 0.8 | 0.8 | 0.2     | On      |
+| No Shuffle   | 10M          | 1M         | 0.8 | 0.8 | 0.1     | Off     |
 
 ## Hardware & Environment
 
@@ -44,134 +52,110 @@ This repository conducts a systematic ablation study on a ~66M parameter GPT-sty
 | OS            | Windows                                      |
 | PyTorch       | CUDA 12.8 build                              |
 | torch.compile | Disabled (`--no_torch_compile`)              |
-| Runtime       | ~26 min/epoch (~8.8 hours/run, avg across 7 runs) |
+| Optimizer     | Muon (matrices) + AdamW (embed/scalars)      |
+| Runtime       | ~26 min/epoch (estimated)                     |
 
 ## Results
 
-| Run          | Val Loss | Best Val Loss | Status  | W&B Link |
-| ------------ | -------- | ------------- | ------- | -------- |
-| Baseline     | 6.1553   | 6.1553        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/atcc23zv) |
-| LR High      | 6.7309   | 6.7309        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/bkgu7cnh) |
-| LR Low       | 6.0326   | 6.0326        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/rabskmre) |
-| Shuffle      | 6.1694   | 6.1694        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/gzl6bjst) |
-| WD Low       | 5.7697   | 5.7697        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/nk5j7ng1) |
-| WD High      | 6.3105   | 6.3105        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/6pxhm623) |
-| Dropout Low  | 6.1938   | 6.1938        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/j2ad0xji) |
-| Dropout High | 6.2938   | 6.2938        | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/hmcn70i4) |
+| Run          | Best Val Loss | Final Val Loss | Train Loss | Best Epoch | Tokens/sec | Peak VRAM | Wall-clock | Status  | W&B Link |
+| ------------ | ------------- | -------------- | ---------- | ---------- | ---------- | --------- | ---------- | ------- | -------- |
+| Baseline     | 4.7624        | 4.8851         | 4.6681     | 13 (EMA)   | 6,432      | 4,717 MiB | 429.0m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/3pzf3l2k) |
+| LR High      | 4.8138        | 4.9550         | 4.7461     | 13 (EMA)   | 6,305      | 4,717 MiB | 450.8m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/gq6kr8we) |
+| LR Low       | 4.6436        | 4.7302         | 4.4751     | 13 (Ckpt avg) | 6,205      | 4,717 MiB | 480.3m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/79wkc6pa) |
+| WD Low       | 4.4606        | 4.5044         | 3.9026     | 16 (Ckpt avg) | 5,669      | 4,717 MiB | 455.7m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/yfhvegka) |
+| WD High      | 4.9253        | 5.0719         | 4.8846     | 13 (EMA)   | 6,353      | 4,717 MiB | 452.8m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/cvug1pug) |
+| Dropout Low  | 4.7150        | 4.8431         | 4.6002     | 13 (EMA)   | 6,792      | 4,712 MiB | 414.0m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/ywvy5jnj) |
+| Dropout High | 4.7854        | 4.8939         | 4.7119     | 13 (EMA)   | 6,221      | 4,717 MiB | 445.2m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/aof41ihb) |
+| No Shuffle   | 4.7597        | 4.8747         | 4.7382     | 13 (EMA)   | 6,567      | 4,717 MiB | 430.5m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/rjxf93em) |
 
-### Leaderboard vs Ablation Baseline
+### Loss Metrics Explained
 
-The ablation runs use a significantly reduced configuration compared to the
-full slowrun leaderboard recipe, constrained by a single 4 GB GPU. The
-training recipe (architecture, regularization) is identical between the two
-— only the scale, optimizer, and a few hardware-related defaults differ.
-This explains why absolute val loss (~6.0) is higher than leaderboard results
-(~4.0) — the difference is driven by model capacity and data budget, not
-recipe modifications.
+Each run produces three distinct validation loss values. The **Best Val Loss**
+column in the results table is the minimum across all three. The annotation in
+the **Best Epoch** column (e.g. "13 (EMA)") indicates which method achieved
+that minimum and at which epoch.
 
-| Feature | Leaderboard Baseline | Ablation Baseline | Reason for Change |
+| Metric | Description | Formula | When Measured |
+| --- | --- | --- | --- |
+| **Per-epoch Val Loss** | Raw model cross-entropy loss (nats/token) on the validation set, evaluated at each epoch boundary | $\text{Val Loss} = \frac{\sum_{i} \text{CE}_i \cdot \mathbb{1}[t_i \neq \text{PAD}]}{\sum_{i} \mathbb{1}[t_i \neq \text{PAD}]}$ | End of every epoch (1–16) |
+| **EMA Val Loss** | Exponential moving average of model weights, bias-corrected, evaluated once after training ends | $\hat{\theta}_{\text{EMA}} = \frac{\sum_{k} \beta^{k} \cdot \theta_{t-k}}{1 - \beta^{n_{\text{updates}}}}$, then $\text{Val Loss} = \frac{\sum_{i} \text{CE}_i \cdot \mathbb{1}[t_i \neq \text{PAD}]}{\sum_{i} \mathbb{1}[t_i \neq \text{PAD}]}$ | Post-training (final EMA eval) |
+| **Ckpt Avg Val Loss (SWA)** | Recency-weighted average of the last 4 epoch checkpoints (Stochastic Weight Averaging), evaluated once after training | $\theta_{\text{SWA}} = \sum_{j=1}^{n} w_j \cdot \theta_{\text{epoch}_j}$, where $w_j = \frac{j}{\sum_{k=1}^{n} k}$, then $\text{Val Loss} = \frac{\sum_{i} \text{CE}_i \cdot \mathbb{1}[t_i \neq \text{PAD}]}{\sum_{i} \mathbb{1}[t_i \neq \text{PAD}]}$ | Post-training (final SWA eval) |
+
+The **Final Val Loss** column is the per-epoch val loss at the last epoch
+(Epoch 16) — the raw model's loss before any EMA or SWA averaging. The **Best
+Val Loss** is:
+
+$$\text{Best Val Loss} = \min\Big(\min_{\text{epoch } 1..16}\; \text{Val Loss}_{\text{raw}},\;\; \text{Val Loss}_{\text{EMA}},\;\; \text{Val Loss}_{\text{SWA}}\Big)$$
+
+All three metrics use the same evaluation function (`evaluate_bpb`) over ~1M
+validation tokens with padding masked out. The EMA and SWA variants differ only
+in **which model weights** are evaluated — the loss computation itself is
+identical.
+
+### Leaderboard vs Muon Ablation Baseline
+
+The Muon ablation uses the same optimizer (Muon + AdamW) and recipe as the
+full-scale leaderboard baseline. The only differences are hardware-driven
+scale reductions — the training recipe is identical.
+
+| Feature | Leaderboard Baseline | Muon Ablation Baseline | Reason for Change |
 | --- | --- | --- | --- |
 | Layers | 16 | 4 | 4 GB VRAM can't fit a 16-layer model |
 | Embed dim | 1024 | 512 | Halved to reduce memory per layer |
-| Parameters | ~350M+ | ~66M | Consequence of fewer layers + smaller dim |
+| Parameters | ~317M | ~66M | Consequence of fewer layers + smaller dim |
 | Training tokens | ~100M | 10M | Shorter training time on a single slow GPU |
 | GPUs | 8× H100 | 1× RTX 3050 (4 GB) | Hardware available for this study |
-| MLP activation | SwiGLU | SwiGLU | — |
-| RoPE | Half-truncated | Half-truncated | — |
-| Attention gate | Per-head, zero-init | Per-head, zero-init | — |
-| Key offset | Partial, long-window layers | Partial, long-window layers | — |
-| U-Net skips | Yes, learnable weights | Yes, learnable weights | — |
-| Value residuals | ResFormer, alternating layers | ResFormer, alternating layers | — |
-| Dataloader | Chunk-based (pre-packed sequences) | Document-based (flat tokens + doc boundaries) | Document-based supports per-epoch doc reshuffling; chunk-based is frozen at preprocessing |
-| Optimizer | Muon (matrices) + AdamW (embed/scalars) | AdamW (all params) | Single-GPU fallback bypasses Muon; all params use AdamW |
-| Weight decay | 3-phase: hold → decay → ramp | 3-phase: hold → decay → ramp | — |
-| EMA | Yes | Disabled (`--update-ema-every 0`) | Save memory/time on single GPU |
-| SWA | Yes, last 4 epochs | Disabled (`--swa-last-epochs 0`) | Save memory/time on single GPU |
-| Warmup ratio | 0.0 | 0.05 | Smaller batch benefits from warmup |
-| LR multiplier | 0.8 | 0.6 | Tuned for smaller batch / single GPU |
-| Epochs | 16 | 20 | More epochs to compensate for fewer steps per epoch |
-| `torch.compile` | Enabled | Disabled (`--no_torch_compile`) | Windows/Inductor unsupported |
 | Device batch size | 32 | 2 | 4 GB VRAM limit |
 | Total batch size | 524,288 | 16,384 | Single GPU, no multi-GPU accumulation |
+| `torch.compile` | Enabled | Disabled (`--no_torch_compile`) | Windows/Inductor unsupported |
 
-### Weight Decay Schedule
+---
 
-Weight decay follows a 3-phase schedule: **hold** at the base value during
-early training, **decay** to near-zero during mid-training to let the model
-learn freely, then **ramp up** at the end to compress the model before
-evaluation. The `--wd-mid` and `--wd-end` values are scaled proportionally
-to `--weight-decay` so the schedule shape is preserved across all WD runs.
+## Phase 2: Architecture Component Ablation
 
-| Phase | Epochs | Baseline (WD=0.8) | WD Low (WD=0.2) | WD High (WD=1.2) |
-| --- | --- | --- | --- | --- |
-| 1 — Hold | 0–2 | 0.8 | 0.2 | 1.2 |
-| 2 — Decay | 2–8 | 0.8 → 0.1 | 0.2 → 0.025 | 1.2 → 0.15 |
-| 3 — Ramp | 8–20 | 0.1 → 1.25 | 0.025 → 0.3125 | 0.15 → 1.875 |
+This phase investigates which architectural features in the slowrun recipe
+actually contribute to model performance. While Phase 1 held the architecture
+fixed and varied training hyperparameters, Phase 2 holds all training
+hyperparameters constant (using the best config from Phase 1) and removes or
+modifies one architectural component at a time. This isolates the contribution
+of each design choice — attention gating, U-Net skip connections, value
+residuals, key offset, and RoPE type — to the final val loss.
 
-## Scaled Experiment Results
+The current baseline recipe uses the following architectural components:
+**per-head attention gate** (zero-init `Linear(12, n_head)`, applied as
+`y * sigmoid(gate(x))` starting at 0.5), **U-Net skip connections** (encoder
+layers push activations, decoder layers pop + add with learnable weights),
+**value residuals** (ResFormer — alternating layers project `x0` into the
+value stream via a gated residual), **partial key offset** (stationary dims
+of keys shifted forward by 1 on long-window and last layers), and
+**half-truncated RoPE** (rotates only `head_dim//4` frequency pairs, leaving
+the rest stationary).
 
-After the ablation study, the best configuration (WD Low: `weight_decay=0.2,
-dropout=0.1`) was re-run at full leaderboard scale on a rented H100 node,
-using the leaderboard default `lr_multiplier=0.8`. The `h100_runs/` folder
-contains standalone scripts with the full-scale defaults (16 layers, 1024
-dim, 524K batch, Muon optimizer, EMA + SWA enabled).
+### Experiment Setup
 
-| Run | Setup | Val Loss | Best Val Loss | Status | W&B Link |
-| --- | --- | --- | --- | --- | --- |
-| H100 Baseline | 16L, 1024d, 100M tokens, WD=0.8, lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | 3.3484 | 3.3343 | Done | [View](https://wandb.ai/i-learn/slowrun/runs/vryw9bxv) |
-| H100 Best Ablation | 16L, 1024d, 100M tokens, WD=0.2 (scaled), lr_mult=0.8, dropout=0.1, no warmup, Muon+AdamW, EMA, SWA, doc-shuffle on | 3.7511 | 3.4929 | Done | [View](https://wandb.ai/i-learn/slowrun/runs/71vfhncu) |
+All runs use the Muon ablation baseline config from Phase 1 (best hyperparameters),
+with one architectural component changed per run.
 
-**Observation:** At full scale, WD=0.8 (baseline) outperformed WD=0.2. This is
-the opposite of the ablation study, where WD Low (5.7697) beat the baseline
-(6.1553). This confirms that the optimal weight decay at small scale (66M
-params, 10M tokens, AdamW) does not transfer to full scale (317M params, 100M
-tokens, Muon optimizer). The Muon optimizer + larger model + more data
-benefits from higher weight decay.
+| Run              | Component Changed | Variant | Purpose |
+| ---------------- | ----------------- | ------- | ------- |
+| Baseline         | —                 | Current recipe | Reference |
+| No Gate          | Attention gate    | Remove gate entirely | Is the per-head gate needed at all? |
+| Identity Gate    | Attention gate    | `1 + 0.25*tanh(...)` | Start at ~1, learn small adjustments |
+| Strong Gate      | Attention gate    | `2*sigmoid(...)` | Start near 1 but can strongly suppress or amplify heads |
+| No U-Net Skips   | U-Net skips       | Remove skip connections | Do encoder-decoder skips help? |
+| No Value Residual | Value residuals   | Remove ResFormer VE | Do value embeddings contribute? |
+| No Key Offset    | Key offset        | Remove partial key shift | Does stationary dim shifting help? |
+| Full RoPE        | RoPE              | Rotate all dims (standard) | Does half-truncated RoPE outperform full? |
 
-## H100 Run Setup
+### Results
 
-After the ablation study, the best configuration will be re-run at full
-leaderboard scale on a rented 8× H100 node (e.g. Lambda Labs). The
-`h100_runs/` folder contains standalone scripts with the full-scale defaults
-(16 layers, 1024 dim, 524K batch, Muon optimizer, EMA + SWA enabled).
-
-### Prerequisites
-
-- **HF token**: Create a read token at https://huggingface.co/settings/tokens
-- **W&B API key**: Get it from https://wandb.ai/authorize
-
-### Setup sequence
-
-```bash
-# 1. Clone and enter the h100_runs directory
-git clone https://github.com/x4ahmed/gpt-ablation-study.git
-cd gpt-ablation-study/h100_runs
-
-# 2. Install dependencies
-pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip install numpy tiktoken wandb datasets tqdm kernels
-
-# 3. Set HF token (persists across sessions)
-echo 'export HF_TOKEN=hf_your_token_here' >> ~/.bashrc
-source ~/.bashrc
-
-# 4. Login to W&B (prompts for API key, saves to ~/.netrc)
-wandb login
-
-# 5. Prepare data (100M train tokens, 10M val tokens — ~10-20 min)
-python prepare_data.py
-
-# 6. Train (8 GPUs, Muon optimizer, EMA + SWA enabled)
-torchrun --standalone --nproc_per_node=8 train.py \
-  --run-name h100_baseline \
-  --wandb_entity i-learn \
-  --no-doc-shuffle
-```
-
-### Notes
-
-- `torch.compile` is always enabled on H100 (Linux/Inductor works fine)
-- Muon optimizer is used for matrix weights, AdamW for embeddings/scalars
-- EMA (every 10 steps) and SWA (last 4 epochs) are enabled by default
-- Results, checkpoints, and model are saved to `runs/<run_name>/`
-- Monitor live metrics at https://wandb.ai/i-learn/slowrun
+| Run              | Best Val Loss | Final Val Loss | Train Loss | Best Epoch | Tokens/sec | Peak VRAM | Wall-clock | Status  | W&B Link |
+| ---------------- | ------------- | -------------- | ---------- | ---------- | ---------- | --------- | ---------- | ------- | -------- |
+| Baseline         | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| No Gate          | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| Identity Gate    | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| Strong Gate      | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| No U-Net Skips   | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| No Value Residual | —            | —              | —          | —          | —          | —         | —          | Pending | —        |
+| No Key Offset    | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| Full RoPE        | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
