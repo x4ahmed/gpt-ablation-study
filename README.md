@@ -116,10 +116,11 @@ scale reductions — the training recipe is identical.
 This phase investigates which architectural features in the slowrun recipe
 actually contribute to model performance. While Phase 1 held the architecture
 fixed and varied training hyperparameters, Phase 2 holds all training
-hyperparameters constant (using the best config from Phase 1) and removes or
-modifies one architectural component at a time. This isolates the contribution
-of each design choice — attention gating, U-Net skip connections, value
-residuals, key offset, and RoPE type — to the final val loss.
+hyperparameters constant (using the same baseline config as Phase 1) and removes
+or modifies one architectural component at a time. Using the same baseline for
+both phases allows direct comparison when scaling the best of each phase. This
+isolates the contribution of each design choice — attention gating, U-Net skip
+connections, value residuals, key offset, and RoPE type — to the final val loss.
 
 The current baseline recipe uses the following architectural components:
 **per-head attention gate** (zero-init `Linear(12, n_head)`, applied as
@@ -151,7 +152,7 @@ with one architectural component changed per run.
 
 | Run              | Best Val Loss | Final Val Loss | Train Loss | Best Epoch | Tokens/sec | Peak VRAM | Wall-clock | Status  | W&B Link |
 | ---------------- | ------------- | -------------- | ---------- | ---------- | ---------- | --------- | ---------- | ------- | -------- |
-| Baseline         | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| Baseline         | 4.7624        | 4.8851         | 4.6681     | 13 (EMA)   | 6,432      | 4,717 MiB | 429.0m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/3pzf3l2k) |
 | No Gate          | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
 | Identity Gate    | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
 | Strong Gate      | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
@@ -159,3 +160,22 @@ with one architectural component changed per run.
 | No Value Residual | —            | —              | —          | —          | —          | —         | —          | Pending | —        |
 | No Key Offset    | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
 | Full RoPE        | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+
+### Ablation Case Summary
+
+All runs use the same training recipe as the Phase 1 baseline (Muon + AdamW,
+16 epochs, 10M tokens, LR multiplier 0.8, WD 0.8, dropout 0.1, EMA every 10
+steps, SWA last 4 epochs). The validation method is identical across all runs
+(`evaluate_bpb` over ~1M tokens). Only the architectural component listed
+below is changed per run; all other hyperparameters remain fixed.
+
+| Run | Flag | What Changes | Params | Param Delta | Training/Validation Impact |
+| --- | --- | --- | --- | --- | --- |
+| **Baseline** | *(none)* | Current recipe — all 5 components active | 65,667,978 | — | Reference run |
+| **No Gate** | `--no-attn-gate` | `attn_gate` Linear(12→8) removed from all 4 layers; attention output `y` passes through `c_proj` directly without any gating | 65,667,594 | −384 | No gate params in optimizer; EMA/SWA operate on fewer params. Training and validation unchanged otherwise. |
+| **Identity Gate** | `--attn-gate-variant identity` | Same `attn_gate` Linear, but formula changes from `sigmoid(0)=0.5` to `1 + 0.25*tanh(0)=1.0` at init — gate starts at identity, learns small adjustments | 65,667,978 | 0 | Same param count, same optimizer groups. Only the forward formula differs. Zero-init still used (starts at ~1.0 instead of 0.5). |
+| **Strong Gate** | `--attn-gate-variant strong` | Same `attn_gate` Linear, but formula changes to `2*sigmoid(0)=1.0` at init — starts near 1 but can strongly suppress (→0) or amplify (→2) heads | 65,667,978 | 0 | Same param count, same optimizer groups. Only the forward formula differs. Zero-init still used (starts at ~1.0). |
+| **No U-Net Skips** | `--no-skip-connections` | `skip_weights` parameter (2 scalars) removed; encoder layers no longer push activations, decoder layers no longer pop+add. Pure sequential residual stream | 65,667,976 | −2 | `skip_weights` removed from AdamW optimizer group. `GPT.forward()` skips push/pop logic. EMA/SWA operate on fewer params. |
+| **No Value Residual** | `--no-value-residual` | `ve_projs` (2× Linear 512→512) and `ve_gate` (2× Linear 32→8) removed; value stream `v` is not augmented with projected `x0`. ResFormer disabled | 65,143,178 | −524,800 | Largest param reduction. `ve_projs` removed from Muon matrix groups, `ve_gate` removed from AdamW. `GPT.forward()` passes `ve=None` to all blocks. EMA/SWA operate on fewer params. |
+| **No Key Offset** | `--no-key-offset` | Partial key shift disabled on long-window and last layers; stationary dims of `k` are no longer shifted forward by 1 | 65,667,978 | 0 | No params removed. Only `CausalSelfAttention.forward()` skips the `k[:, 1:, ...]` shift. Optimizer, EMA, SWA all unchanged. |
+| **Full RoPE** | `--rope-variant full` | `_precompute_rotary` rotates all `head_dim//2=32` frequency pairs instead of `head_dim//4=16` pairs with zero-padding. Standard RoPE | 65,667,978 | 0 | No params removed. Only `cos`/`sin` buffers differ (all dims rotated vs. half stationary). Optimizer, EMA, SWA all unchanged. |
