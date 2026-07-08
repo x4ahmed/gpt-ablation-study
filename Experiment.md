@@ -61,12 +61,36 @@ establish a fair comparison with the H100 baseline run.
 | ------------ | ------------- | -------------- | ---------- | ---------- | ---------- | --------- | ---------- | ------- | -------- |
 | Baseline     | 4.7624        | 4.8851         | 4.6681     | 13 (EMA)   | 6,432      | 4,717 MiB | 429.0m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/3pzf3l2k) |
 | LR High      | 4.8138        | 4.9550         | 4.7461     | 13 (EMA)   | 6,305      | 4,717 MiB | 450.8m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/gq6kr8we) |
-| LR Low       | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
-| WD Low       | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
-| WD High      | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
-| Dropout Low  | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
-| Dropout High | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
-| No Shuffle   | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| LR Low       | 4.6436        | 4.7302         | 4.4751     | 13 (Ckpt avg) | 6,205      | 4,717 MiB | 480.3m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/79wkc6pa) |
+| WD Low       | 4.4606        | 4.5044         | 3.9026     | 16 (Ckpt avg) | 5,669      | 4,717 MiB | 455.7m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/yfhvegka) |
+| WD High      | 4.9253        | 5.0719         | 4.8846     | 13 (EMA)   | 6,353      | 4,717 MiB | 452.8m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/cvug1pug) |
+| Dropout Low  | 4.7150        | 4.8431         | 4.6002     | 13 (EMA)   | 6,792      | 4,712 MiB | 414.0m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/ywvy5jnj) |
+| Dropout High | 4.7854        | 4.8939         | 4.7119     | 13 (EMA)   | 6,221      | 4,717 MiB | 445.2m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/aof41ihb) |
+| No Shuffle   | 4.7597        | 4.8747         | 4.7382     | 13 (EMA)   | 6,567      | 4,717 MiB | 430.5m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/rjxf93em) |
+
+### Loss Metrics Explained
+
+Each run produces three distinct validation loss values. The **Best Val Loss**
+column in the results table is the minimum across all three. The annotation in
+the **Best Epoch** column (e.g. "13 (EMA)") indicates which method achieved
+that minimum and at which epoch.
+
+| Metric | Description | Formula | When Measured |
+| --- | --- | --- | --- |
+| **Per-epoch Val Loss** | Raw model cross-entropy loss (nats/token) on the validation set, evaluated at each epoch boundary | $\text{Val Loss} = \frac{\sum_{i} \text{CE}_i \cdot \mathbb{1}[t_i \neq \text{PAD}]}{\sum_{i} \mathbb{1}[t_i \neq \text{PAD}]}$ | End of every epoch (1–16) |
+| **EMA Val Loss** | Exponential moving average of model weights, bias-corrected, evaluated once after training ends | $\hat{\theta}_{\text{EMA}} = \frac{\sum_{k} \beta^{k} \cdot \theta_{t-k}}{1 - \beta^{n_{\text{updates}}}}$, then $\text{Val Loss} = \frac{\sum_{i} \text{CE}_i \cdot \mathbb{1}[t_i \neq \text{PAD}]}{\sum_{i} \mathbb{1}[t_i \neq \text{PAD}]}$ | Post-training (final EMA eval) |
+| **Ckpt Avg Val Loss (SWA)** | Recency-weighted average of the last 4 epoch checkpoints (Stochastic Weight Averaging), evaluated once after training | $\theta_{\text{SWA}} = \sum_{j=1}^{n} w_j \cdot \theta_{\text{epoch}_j}$, where $w_j = \frac{j}{\sum_{k=1}^{n} k}$, then $\text{Val Loss} = \frac{\sum_{i} \text{CE}_i \cdot \mathbb{1}[t_i \neq \text{PAD}]}{\sum_{i} \mathbb{1}[t_i \neq \text{PAD}]}$ | Post-training (final SWA eval) |
+
+The **Final Val Loss** column is the per-epoch val loss at the last epoch
+(Epoch 16) — the raw model's loss before any EMA or SWA averaging. The **Best
+Val Loss** is:
+
+$$\text{Best Val Loss} = \min\Big(\min_{\text{epoch } 1..16}\; \text{Val Loss}_{\text{raw}},\;\; \text{Val Loss}_{\text{EMA}},\;\; \text{Val Loss}_{\text{SWA}}\Big)$$
+
+All three metrics use the same evaluation function (`evaluate_bpb`) over ~1M
+validation tokens with padding masked out. The EMA and SWA variants differ only
+in **which model weights** are evaluated — the loss computation itself is
+identical.
 
 ### Leaderboard vs Muon Ablation Baseline
 
