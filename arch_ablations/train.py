@@ -1069,7 +1069,7 @@ encoder = tiktoken.get_encoding("gpt2")
 vocab_size = encoder.n_vocab  # 50257
 print0(f"Vocab size: {vocab_size:,}")
 
-eot_id = encoder._special_tokens['']
+eot_id = encoder._special_tokens['<|endoftext|>']
 token_bytes_list = []
 for i in range(vocab_size):
     if i == eot_id:
