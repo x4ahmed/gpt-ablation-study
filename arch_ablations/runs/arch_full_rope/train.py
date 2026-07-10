@@ -1,16 +1,16 @@
 """
 Train a language model on ~100M tokens with val loss evaluation.
-AdamW-only version: uses AdamW optimizer for ALL parameters (no Muon).
-Identical to the Muon baseline in every other aspect — same architecture,
-same data, same training loop, same EMA/SWA, same hyperparameter defaults.
-The only difference is the optimizer: AdamW everywhere instead of Muon for
-matrices + AdamW for embeddings/scalars.
+Muon version: uses Muon optimizer for matrices + AdamW for embeddings/scalars.
+Works on single GPU (no torchrun required) — Muon runs without distributed collectives.
 
-Works on single GPU (no torchrun required).
+Architecture ablation version: adds CLI flags to toggle individual architectural
+components (attention gate, U-Net skips, value residuals, key offset, RoPE type).
+With no ablation flags, runs identically to the muon_runs baseline.
 
 Usage:
     python train.py
     python train.py --run-name my_run --wandb_entity i-learn
+    python train.py --no-attn-gate --run-name arch_no_gate
 """
 
 import os
@@ -24,7 +24,7 @@ import sys
 import shutil
 from types import SimpleNamespace
 from functools import partial
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import nullcontext
 
 import torch
@@ -43,7 +43,7 @@ _script_start = time.time()
 # CLI arguments
 # =============================================================================
 
-parser = argparse.ArgumentParser(description="Train GPT model (AdamW optimizer — all params)")
+parser = argparse.ArgumentParser(description="Train GPT model (Muon optimizer) — Architecture Ablation")
 parser.add_argument("--device-batch-size", type=int, default=32)
 parser.add_argument("--num-epochs", type=int, default=16)
 parser.add_argument("--patience", type=int, default=-1)
@@ -68,7 +68,7 @@ parser.add_argument("--save-result", type=str, default="")
 parser.add_argument("--n_layer", type=int, default=16)
 parser.add_argument("--n_head", type=int, default=8)
 parser.add_argument("--n_embd", type=int, default=1024)
-parser.add_argument("--lr_multiplier", type=float, default=0.8)
+parser.add_argument("--lr_multiplier", type=float, default=0.6)
 parser.add_argument("--input_bin", type=str, default=None)
 parser.add_argument("--input_val_bin", type=str, default=None)
 parser.add_argument("--output_json", type=str, default=None)
@@ -84,6 +84,26 @@ parser.add_argument("--swa-last-epochs", type=int, default=4,
                     help="SWA: cosine-cycle LR in last N epochs for checkpoint diversity (0=off)")
 parser.add_argument("--no-doc-shuffle", action="store_true",
                     help="Disable per-epoch document reshuffling (still shuffles batch order)")
+
+# ── Architecture ablation flags ──────────────────────────────────────────────
+# All default to the baseline recipe. Passing a flag activates the ablation.
+# With none of these flags, the model is identical to muon_runs/train.py.
+parser.add_argument("--no-attn-gate", action="store_true",
+                    help="Remove per-head attention gate entirely")
+parser.add_argument("--attn-gate-variant", type=str, default="sigmoid",
+                    choices=["sigmoid", "identity", "strong"],
+                    help="Attention gate variant: sigmoid (default, 0.5 start), "
+                         "identity (1+0.25*tanh, ~1 start), strong (2*sigmoid, ~1 start)")
+parser.add_argument("--no-skip-connections", action="store_true",
+                    help="Remove U-Net skip connections")
+parser.add_argument("--no-value-residual", action="store_true",
+                    help="Remove ResFormer value embeddings (ve_projs + ve_gate)")
+parser.add_argument("--no-key-offset", action="store_true",
+                    help="Remove partial key offset on long-window layers")
+parser.add_argument("--rope-variant", type=str, default="half",
+                    choices=["half", "full"],
+                    help="RoPE variant: half (default, rotates head_dim//4 pairs) "
+                         "or full (standard, rotates all dims)")
 args = parser.parse_args()
 
 # Resolve output path
@@ -232,6 +252,13 @@ class GPTConfig:
     window_pattern: str = WINDOW_PATTERN
     dropout: float = 0.1
     device_batch_size: int = 32
+    # Architecture ablation toggles (all default to baseline recipe)
+    no_attn_gate: bool = False
+    attn_gate_variant: str = "sigmoid"       # "sigmoid" | "identity" | "strong"
+    no_skip_connections: bool = False
+    no_value_residual: bool = False
+    no_key_offset: bool = False
+    rope_variant: str = "half"               # "half" | "full"
 
 def norm(x):
     return F.rms_norm(x, (x.size(-1),))
@@ -249,6 +276,7 @@ def apply_rotary_emb(x, cos, sin):
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
+        self.config = config
         self.n_head = config.n_head
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
@@ -260,22 +288,30 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.ve_gate_channels = 32
-        self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
-        # Per-head attention gate: enables context-based attention no-op
+        # Value residual gate — only created if value residuals are enabled
+        if not config.no_value_residual:
+            self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
+        else:
+            self.ve_gate = None
+        # Per-head attention gate — only created if attention gate is enabled
         self.attn_gate_channels = 12
-        self.attn_gate = nn.Linear(self.attn_gate_channels, self.n_head, bias=False)
+        if not config.no_attn_gate:
+            self.attn_gate = nn.Linear(self.attn_gate_channels, self.n_head, bias=False)
+        else:
+            self.attn_gate = None
         # Determine if this is a long-window layer for partial key offset
         pattern = config.window_pattern.upper()
         char = pattern[layer_idx % len(pattern)]
-        self.use_key_offset = (char == 'L') or (layer_idx == config.n_layer - 1)
+        # Key offset can be disabled globally via config
+        self.use_key_offset = (not config.no_key_offset) and ((char == 'L') or (layer_idx == config.n_layer - 1))
 
     def forward(self, x, ve, cos_sin, window_size):
         B, T, C = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
-        # Value residual (ResFormer)
-        if ve is not None:
+        # Value residual (ResFormer) — skip entirely if disabled
+        if ve is not None and not self.config.no_value_residual:
             ve = ve.view(B, T, self.n_kv_head, self.head_dim)
             gate = 2 * torch.sigmoid(self.ve_gate(x[..., :self.ve_gate_channels]))
             v = v + gate.unsqueeze(-1) * ve
@@ -286,8 +322,17 @@ class CausalSelfAttention(nn.Module):
         if self.use_key_offset and T > 1:
             k[:, 1:, :, self.head_dim // 2:] = k[:, :-1, :, self.head_dim // 2:].clone()
         y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        # Per-head attention gate (sparse gated attention, zero-init → sigmoid(0)=0.5 at start)
-        y = y * torch.sigmoid(self.attn_gate(x[..., :self.attn_gate_channels])).unsqueeze(-1)
+        # Per-head attention gate — variant depends on config
+        if self.attn_gate is not None:
+            gate_input = x[..., :self.attn_gate_channels]
+            if self.config.attn_gate_variant == "identity":
+                # Start at ~1, learn small adjustments: 1 + 0.25*tanh(...)
+                y = y * (1 + 0.25 * torch.tanh(self.attn_gate(gate_input))).unsqueeze(-1)
+            elif self.config.attn_gate_variant == "strong":
+                # Start near 1 but can strongly suppress or amplify heads: 2*sigmoid(...)
+                y = y * (2 * torch.sigmoid(self.attn_gate(gate_input))).unsqueeze(-1)
+            else:  # sigmoid (default) — zero-init → sigmoid(0)=0.5 at start
+                y = y * torch.sigmoid(self.attn_gate(gate_input)).unsqueeze(-1)
         y = y.contiguous().view(B, T, -1)
         return self.resid_dropout(self.c_proj(y))
 
@@ -333,10 +378,18 @@ class GPT(nn.Module):
         self.x0_lambdas = nn.Parameter(torch.zeros(config.n_layer))
         head_dim = config.n_embd // config.n_head
         kv_dim = config.n_kv_head * head_dim
-        self.ve_projs = nn.ModuleDict({str(i): nn.Linear(config.n_embd, kv_dim, bias=False) for i in range(config.n_layer) if has_ve(i, config.n_layer)})
+        # Value embedding projections — only created if value residuals are enabled
+        if not config.no_value_residual:
+            self.ve_projs = nn.ModuleDict({str(i): nn.Linear(config.n_embd, kv_dim, bias=False) for i in range(config.n_layer) if has_ve(i, config.n_layer)})
+        else:
+            self.ve_projs = nn.ModuleDict()
         # U-Net skip connections: encoder layer i → decoder layer (n_layer - 1 - i)
         self.encoder_layers = config.n_layer // 2
-        self.skip_weights = nn.Parameter(torch.ones(self.encoder_layers))
+        # Skip weights — only created if skip connections are enabled
+        if not config.no_skip_connections:
+            self.skip_weights = nn.Parameter(torch.ones(self.encoder_layers))
+        else:
+            self.skip_weights = None
         self.rotary_seq_len = config.sequence_len * 10
         cos, sin = self._precompute_rotary(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False)
@@ -363,8 +416,10 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             if block.attn.ve_gate is not None:
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)
-            torch.nn.init.zeros_(block.attn.attn_gate.weight)
-        self.skip_weights.fill_(1.0)
+            if block.attn.attn_gate is not None:
+                torch.nn.init.zeros_(block.attn.attn_gate.weight)
+        if self.skip_weights is not None:
+            self.skip_weights.fill_(1.0)
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
@@ -373,15 +428,26 @@ class GPT(nn.Module):
 
     def _precompute_rotary(self, seq_len, head_dim, base=10000):
         device = self.transformer.wte.weight.device
-        # Half-truncated RoPE: only rotate half the dims, leave the rest stationary
-        half = head_dim // 4  # number of frequency pairs for the rotated half
-        inv_freq = 1.0 / (base ** (torch.arange(0, half * 2, 2, dtype=torch.float32, device=device) / (half * 2)))
-        # Pad with zeros for the stationary half
-        inv_freq = torch.cat([inv_freq, torch.zeros(head_dim // 2 - half, dtype=torch.float32, device=device)])
-        t = torch.arange(seq_len, dtype=torch.float32, device=device)
-        freqs = torch.outer(t, inv_freq)
-        cos, sin = freqs.cos().bfloat16(), freqs.sin().bfloat16()
-        return cos[None, :, None, :], sin[None, :, None, :]
+        if self.config.rope_variant == "full":
+            # Full RoPE: rotate all dims (standard)
+            half = head_dim // 2  # number of frequency pairs
+            inv_freq = 1.0 / (base ** (torch.arange(0, half * 2, 2, dtype=torch.float32, device=device) / (half * 2)))
+            # No padding — all dims are rotated
+            t = torch.arange(seq_len, dtype=torch.float32, device=device)
+            freqs = torch.outer(t, inv_freq)
+            cos, sin = freqs.cos().bfloat16(), freqs.sin().bfloat16()
+            return cos[None, :, None, :], sin[None, :, None, :]
+        else:
+            # Half-truncated RoPE (default): only rotate head_dim//4 frequency pairs,
+            # leave the rest stationary
+            half = head_dim // 4  # number of frequency pairs for the rotated half
+            inv_freq = 1.0 / (base ** (torch.arange(0, half * 2, 2, dtype=torch.float32, device=device) / (half * 2)))
+            # Pad with zeros for the stationary half
+            inv_freq = torch.cat([inv_freq, torch.zeros(head_dim // 2 - half, dtype=torch.float32, device=device)])
+            t = torch.arange(seq_len, dtype=torch.float32, device=device)
+            freqs = torch.outer(t, inv_freq)
+            cos, sin = freqs.cos().bfloat16(), freqs.sin().bfloat16()
+            return cos[None, :, None, :], sin[None, :, None, :]
 
     def _compute_window_sizes(self, config):
         pattern = config.window_pattern.upper()
@@ -406,47 +472,45 @@ class GPT(nn.Module):
         nparams_exclude = (self.transformer.wte.weight.numel()
                           + self.resid_lambdas.numel()
                           + self.x0_lambdas.numel()
-                          + self.skip_weights.numel())
+                          + (self.skip_weights.numel() if self.skip_weights is not None else 0))
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
         # Exact causal sliding-window attention FLOPs: 12 * h * q * E[keys attended per query]
         attn_flops = sum(12 * h * q * self._avg_causal_attended_keys(w[0], t) for w in self.window_sizes)
         return 6 * (nparams - nparams_exclude) + attn_flops
 
     def setup_optimizer(self):
-        # AdamW for ALL parameters — same param groups as Muon baseline but all kind='adamw'
-        # The LR assignments match the Muon baseline exactly:
-        #   - lm_head (unembedding): UNEMBEDDING_LR
-        #   - wte (embedding): EMBEDDING_LR
-        #   - resid_lambdas: SCALAR_LR * 0.01
-        #   - x0_lambdas: SCALAR_LR
-        #   - skip_weights: SCALAR_LR * 0.01
-        #   - attn_gate: SCALAR_LR
-        #   - all matrix params (c_q, c_k, c_v, c_proj, mlp, ve_projs): MATRIX_LR
-        attn_gate_params = [block.attn.attn_gate.weight for block in self.transformer.h]
+        ddp, rank, local_rank, world_size = get_dist_info()
+        # Separate attn_gate params (small, Adam-optimized) from matrix params (Muon)
+        # Only include attn_gate params if the gate exists
+        attn_gate_params = [block.attn.attn_gate.weight for block in self.transformer.h if block.attn.attn_gate is not None]
         attn_gate_ids = {id(p) for p in attn_gate_params}
+        # Collect all h params + ve_projs params (ve_projs may be empty if value residual disabled)
         all_h_params = list(self.transformer.h.parameters()) + list(self.ve_projs.parameters())
         matrix_params = [p for p in all_h_params if id(p) not in attn_gate_ids]
         embed_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
-        skip_params = [self.skip_weights]
+        skip_params = [self.skip_weights] if self.skip_weights is not None else []
 
         param_groups = [
             dict(kind='adamw', params=lm_head_params, lr=UNEMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
             dict(kind='adamw', params=embed_params, lr=EMBEDDING_LR, betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY),
             dict(kind='adamw', params=resid_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
             dict(kind='adamw', params=x0_params, lr=SCALAR_LR, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=skip_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0),
-            dict(kind='adamw', params=attn_gate_params, lr=SCALAR_LR, betas=(0.9, 0.99), eps=1e-10, weight_decay=0.0),
         ]
-        # Matrix params: AdamW with MATRIX_LR (same LR as Muon used, but AdamW instead of Muon)
+        # Skip connection weights — only add if they exist
+        if skip_params:
+            param_groups.append(dict(kind='adamw', params=skip_params, lr=SCALAR_LR * 0.01, betas=ADAM_BETAS, eps=1e-10, weight_decay=0.0))
+        # Attention gate params — only add if they exist
+        if attn_gate_params:
+            param_groups.append(dict(kind='adamw', params=attn_gate_params, lr=SCALAR_LR, betas=(0.9, 0.99), eps=1e-10, weight_decay=0.0))
         for shape in sorted({p.shape for p in matrix_params}):
             group_params = [p for p in matrix_params if p.shape == shape]
-            param_groups.append(dict(kind='adamw', params=group_params, lr=MATRIX_LR,
-                                     betas=ADAM_BETAS, eps=1e-10, weight_decay=WEIGHT_DECAY))
+            param_groups.append(dict(kind='muon', params=group_params, lr=MATRIX_LR,
+                                     momentum=0.95, ns_steps=5, beta2=0.95, weight_decay=WEIGHT_DECAY))
 
-        optimizer = AdamWAll(param_groups)
+        optimizer = MuonAdamW(param_groups)
         for group in optimizer.param_groups:
             group["initial_lr"] = group["lr"]
         return optimizer
@@ -458,13 +522,16 @@ class GPT(nn.Module):
         x0 = x
         skip_connections = []
         for i, block in enumerate(self.transformer.h):
-            if i >= self.encoder_layers and skip_connections:
+            # U-Net skip connections — only if enabled
+            if not self.config.no_skip_connections and i >= self.encoder_layers and skip_connections:
                 skip = skip_connections.pop()
                 x = x + self.skip_weights[i - self.encoder_layers] * skip
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            # Value embedding projection — only if enabled
             ve = self.ve_projs[str(i)](x0) if str(i) in self.ve_projs else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
-            if i < self.encoder_layers:
+            # U-Net skip connections — only push if enabled
+            if not self.config.no_skip_connections and i < self.encoder_layers:
                 skip_connections.append(x)
         x = norm(x)
         logits = self.lm_head(x)[..., :self.config.vocab_size].float()
@@ -474,10 +541,18 @@ class GPT(nn.Module):
         return logits
 
 # =============================================================================
-# Optimizer: AdamW for ALL parameters
-# Uses the same fused AdamW step as the Muon baseline, but for every param group
-# (no Muon orthogonalization). Same LRs, same betas, same weight decay.
+# Optimizer: MuonAdamW (Muon for matrices, AdamW for embeddings/scalars)
+# Supports both distributed (torchrun) and single-GPU (python) execution.
 # =============================================================================
+
+# Polar Express coefficients for orthogonalization
+polar_express_coeffs = [
+    (8.156554524902461, -22.48329292557795, 15.878769915207462),
+    (4.042929935166739, -2.808917465908714, 0.5000178451051316),
+    (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
+    (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
+    (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
+]
 
 # Check if Triton is available (required by torch.compile on GPU)
 # Fall back to eager mode if not (e.g. Windows without Triton)
@@ -502,13 +577,48 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     bias2 = 1 - beta2_t ** step_t
     p.add_(exp_avg / ((exp_avg_sq / bias2).sqrt() + eps_t), alpha=-(lr_t / bias1))
 
+@_compile_fn
+def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
+                    momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
+    momentum = momentum_t.to(stacked_grads.dtype)
+    momentum_buffer.lerp_(stacked_grads, 1 - momentum)
+    g = stacked_grads.lerp_(momentum_buffer, momentum)
+    # Polar Express orthogonalization
+    X = g.bfloat16()
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + 1e-6)
+    if g.size(-2) > g.size(-1):
+        for a, b, c in polar_express_coeffs[:ns_steps]:
+            A = X.mT @ X
+            X = a * X + X @ (b * A + c * (A @ A))
+    else:
+        for a, b, c in polar_express_coeffs[:ns_steps]:
+            A = X @ X.mT
+            X = a * X + (b * A + c * (A @ A)) @ X
+    g = X
+    # Variance reduction
+    beta2 = beta2_t.to(g.dtype)
+    v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
+    red_dim_size = g.size(red_dim)
+    v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
+    v_norm = v_norm_sq.sqrt()
+    second_momentum_buffer.lerp_(v_mean.to(dtype=second_momentum_buffer.dtype), 1 - beta2)
+    step_size = second_momentum_buffer.clamp_min(1e-10).rsqrt()
+    scaled_sq_sum = (v_mean * red_dim_size) * step_size.float().square()
+    v_norm_new = scaled_sq_sum.sum(dim=(-2, -1), keepdim=True).sqrt()
+    final_scale = step_size * (v_norm / v_norm_new.clamp_min(1e-10))
+    g = g * final_scale.to(g.dtype)
+    # Cautious weight decay + update
+    lr = lr_t.to(g.dtype)
+    wd = wd_t.to(g.dtype)
+    mask = (g * stacked_params) >= 0
+    stacked_params.sub_(lr * g + lr * wd * stacked_params * mask)
 
-class AdamWAll(torch.optim.Optimizer):
-    """AdamW for all parameters — single-GPU and distributed.
 
-    Single-GPU mode: runs the fused AdamW step directly on each param.
-    Multi-GPU mode: uses ZeRO-2 style gradient sharding via NCCL collectives,
-    identical to the Muon baseline's AdamW path.
+class MuonAdamW(torch.optim.Optimizer):
+    """MuonAdamW — works on single GPU (no distributed collectives) and multi-GPU.
+
+    Single-GPU mode: Muon runs directly on full gradients (no ZeRO sharding).
+    Multi-GPU mode: Uses ZeRO-2 style gradient sharding via NCCL collectives.
     """
     def __init__(self, param_groups):
         super().__init__(param_groups, defaults={})
@@ -518,6 +628,10 @@ class AdamWAll(torch.optim.Optimizer):
         self._adamw_beta2_t = torch.tensor(0.0)
         self._adamw_eps_t = torch.tensor(0.0)
         self._adamw_wd_t = torch.tensor(0.0)
+        self._muon_momentum_t = torch.tensor(0.0)
+        self._muon_lr_t = torch.tensor(0.0)
+        self._muon_wd_t = torch.tensor(0.0)
+        self._muon_beta2_t = torch.tensor(0.0)
 
     def _reduce_adamw(self, group, world_size):
         infos = {}
@@ -533,6 +647,20 @@ class AdamWAll(torch.optim.Optimizer):
                 future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
                 infos[p] = dict(future=future, grad_slice=grad_slice, is_small=False)
         return dict(param_infos=infos)
+
+    def _reduce_muon(self, group, world_size):
+        params = group['params']
+        chunk_size = (len(params) + world_size - 1) // world_size
+        padded = chunk_size * world_size
+        p = params[0]
+        shape, device, dtype = p.shape, p.device, p.dtype
+        stacked_grads = torch.empty(padded, *shape, dtype=dtype, device=device)
+        stacked_grads[:len(params)].copy_(torch.stack([p.grad for p in params]))
+        if len(params) < padded:
+            stacked_grads[len(params):].zero_()
+        grad_chunk = torch.empty(chunk_size, *shape, dtype=dtype, device=device)
+        future = dist.reduce_scatter_tensor(grad_chunk, stacked_grads, op=dist.ReduceOp.AVG, async_op=True).get_future()
+        return dict(future=future, grad_chunk=grad_chunk, stacked_grads=stacked_grads, chunk_size=chunk_size)
 
     def _compute_adamw(self, group, info, gather_list, rank, world_size):
         for p in group['params']:
@@ -562,6 +690,40 @@ class AdamWAll(torch.optim.Optimizer):
                 future = dist.all_gather_into_tensor(p, p_slice, async_op=True).get_future()
                 gather_list.append(dict(future=future, params=None))
 
+    def _compute_muon(self, group, info, gather_list, rank):
+        info['future'].wait()
+        params = group['params']
+        chunk_size = info['chunk_size']
+        p = params[0]
+        shape, device, dtype = p.shape, p.device, p.dtype
+        start_idx = rank * chunk_size
+        num_owned = min(chunk_size, max(0, len(params) - start_idx))
+        state = self.state[p]
+        if "momentum_buffer" not in state:
+            state["momentum_buffer"] = torch.zeros(chunk_size, *shape, dtype=dtype, device=device)
+        if "second_momentum_buffer" not in state:
+            s = (chunk_size, shape[-2], 1) if shape[-2] >= shape[-1] else (chunk_size, 1, shape[-1])
+            state["second_momentum_buffer"] = torch.zeros(s, dtype=dtype, device=device)
+        red_dim = -1 if shape[-2] >= shape[-1] else -2
+        updated = torch.empty(chunk_size, *shape, dtype=dtype, device=device)
+        if num_owned > 0:
+            owned = torch.stack([params[start_idx + i] for i in range(num_owned)])
+            self._muon_momentum_t.fill_(group["momentum"])
+            self._muon_beta2_t.fill_(group["beta2"])
+            self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1])**0.5)
+            self._muon_wd_t.fill_(group["weight_decay"])
+            muon_step_fused(info['grad_chunk'][:num_owned], owned,
+                          state["momentum_buffer"][:num_owned], state["second_momentum_buffer"][:num_owned],
+                          self._muon_momentum_t, self._muon_lr_t, self._muon_wd_t, self._muon_beta2_t,
+                          group["ns_steps"], red_dim)
+            updated[:num_owned].copy_(owned)
+        if num_owned < chunk_size:
+            updated[num_owned:].zero_()
+        stacked_params = info["stacked_grads"]
+        future = dist.all_gather_into_tensor(stacked_params, updated, async_op=True).get_future()
+        gather_list.append(dict(future=future, stacked_params=stacked_params, params=params))
+
+    # ---- Single-GPU Muon path ----
     def _compute_adamw_single(self, group):
         """AdamW update for single GPU — no distributed collectives."""
         for p in group['params']:
@@ -584,6 +746,45 @@ class AdamWAll(torch.optim.Optimizer):
                            self._adamw_step_t, self._adamw_lr_t, self._adamw_beta1_t,
                            self._adamw_beta2_t, self._adamw_eps_t, self._adamw_wd_t)
 
+    def _compute_muon_single(self, group):
+        """Muon update for single GPU — no distributed collectives, no ZeRO sharding.
+
+        Stacks all params in the group, runs muon_step_fused on the full stack,
+        then copies results back. This is mathematically identical to the
+        distributed version with world_size=1 (each rank owns all params).
+        """
+        params = group['params']
+        if not params:
+            return
+        p0 = params[0]
+        shape, device, dtype = p0.shape, p0.device, p0.dtype
+        num_params = len(params)
+
+        # Stack all gradients
+        stacked_grads = torch.stack([p.grad for p in params])
+        stacked_params = torch.stack([p for p in params])
+
+        state = self.state[p0]
+        if "momentum_buffer" not in state:
+            state["momentum_buffer"] = torch.zeros(num_params, *shape, dtype=dtype, device=device)
+        if "second_momentum_buffer" not in state:
+            s = (num_params, shape[-2], 1) if shape[-2] >= shape[-1] else (num_params, 1, shape[-1])
+            state["second_momentum_buffer"] = torch.zeros(s, dtype=dtype, device=device)
+        red_dim = -1 if shape[-2] >= shape[-1] else -2
+
+        self._muon_momentum_t.fill_(group["momentum"])
+        self._muon_beta2_t.fill_(group["beta2"])
+        self._muon_lr_t.fill_(group["lr"] * max(1.0, shape[-2] / shape[-1])**0.5)
+        self._muon_wd_t.fill_(group["weight_decay"])
+
+        muon_step_fused(stacked_grads, stacked_params,
+                      state["momentum_buffer"], state["second_momentum_buffer"],
+                      self._muon_momentum_t, self._muon_lr_t, self._muon_wd_t, self._muon_beta2_t,
+                      group["ns_steps"], red_dim)
+
+        # Copy updated params back
+        torch._foreach_copy_(params, list(stacked_params.unbind(0)))
+
     @torch.no_grad()
     def step(self):
         if dist.is_available() and dist.is_initialized():
@@ -592,20 +793,28 @@ class AdamWAll(torch.optim.Optimizer):
             _, rank, _, world_size = get_dist_info()
 
         if world_size <= 1:
-            # Single-GPU path: AdamW for all params, no distributed collectives
+            # Single-GPU path: Muon for matrix params, AdamW for embeddings/scalars
+            # No distributed collectives needed — gradients are already local
             for group in self.param_groups:
-                self._compute_adamw_single(group)
+                if group['kind'] == 'adamw':
+                    self._compute_adamw_single(group)
+                elif group['kind'] == 'muon':
+                    self._compute_muon_single(group)
             return
 
         # Distributed path (torchrun with >= 2 GPUs)
         reduce_infos = []
         for group in self.param_groups:
-            reduce_infos.append(self._reduce_adamw(group, world_size))
+            if group['kind'] == 'adamw': reduce_infos.append(self._reduce_adamw(group, world_size))
+            elif group['kind'] == 'muon': reduce_infos.append(self._reduce_muon(group, world_size))
         gather_list = []
         for group, info in zip(self.param_groups, reduce_infos):
-            self._compute_adamw(group, info, gather_list, rank, world_size)
+            if group['kind'] == 'adamw': self._compute_adamw(group, info, gather_list, rank, world_size)
+            elif group['kind'] == 'muon': self._compute_muon(group, info, gather_list, rank)
         for info in gather_list:
             info["future"].wait()
+            if info.get("params") is not None:
+                torch._foreach_copy_(info["params"], list(info["stacked_params"][:len(info["params"])].unbind(0)))
 
 # =============================================================================
 # Dataloader: BOS-aligned best-fit packing
@@ -844,7 +1053,13 @@ print0(f"  num_epochs={args.num_epochs}, patience={args.patience}")
 print0(f"  dropout={args.dropout}")
 print0(f"  doc_shuffle={not args.no_doc_shuffle}")
 print0(f"  ema_every={args.update_ema_every}, swa_last_epochs={args.swa_last_epochs}")
-print0(f"  optimizer=AdamW (all params)")
+print0(f"  optimizer=Muon (matrices) + AdamW (embed/scalars)")
+print0(f"  --- Architecture Ablation Flags ---")
+print0(f"  no_attn_gate={args.no_attn_gate}, attn_gate_variant={args.attn_gate_variant}")
+print0(f"  no_skip_connections={args.no_skip_connections}")
+print0(f"  no_value_residual={args.no_value_residual}")
+print0(f"  no_key_offset={args.no_key_offset}")
+print0(f"  rope_variant={args.rope_variant}")
 print0(f"  run={run_name}")
 print0(f"  run_dir={run_dir}")
 print0(f"-----------------------")
@@ -854,7 +1069,7 @@ encoder = tiktoken.get_encoding("gpt2")
 vocab_size = encoder.n_vocab  # 50257
 print0(f"Vocab size: {vocab_size:,}")
 
-eot_id = encoder._special_tokens['']
+eot_id = encoder._special_tokens['<|endoftext|>']
 token_bytes_list = []
 for i in range(vocab_size):
     if i == eot_id:
@@ -864,7 +1079,17 @@ for i in range(vocab_size):
 token_bytes = torch.tensor(token_bytes_list, dtype=torch.int32, device=device)
 
 # Build model
-config = GPTConfig(vocab_size=vocab_size, dropout=args.dropout, device_batch_size=args.device_batch_size)
+config = GPTConfig(
+    vocab_size=vocab_size,
+    dropout=args.dropout,
+    device_batch_size=args.device_batch_size,
+    no_attn_gate=args.no_attn_gate,
+    attn_gate_variant=args.attn_gate_variant,
+    no_skip_connections=args.no_skip_connections,
+    no_value_residual=args.no_value_residual,
+    no_key_offset=args.no_key_offset,
+    rope_variant=args.rope_variant,
+)
 with torch.device("meta"):
     model = GPT(config)
 model.to_empty(device=device)
@@ -996,6 +1221,8 @@ while current_epoch <= args.num_epochs:
         if "initial_wd" not in group:
             group["initial_wd"] = group.get("weight_decay", 0.0)
         group["weight_decay"] = group["initial_wd"] * wd_scale
+        if group['kind'] == 'muon':
+            group["momentum"] = get_muon_momentum(step)
     optimizer.step()
     model.zero_grad(set_to_none=True)
     if ema_params is not None and step % args.update_ema_every == 0:
@@ -1145,6 +1372,12 @@ if master_process:
         "val_loss": val_loss,
         "best_val_loss": min_val_loss,
         "wandb_url": getattr(wandb_run, "url", None),
+        "no_attn_gate": args.no_attn_gate,
+        "attn_gate_variant": args.attn_gate_variant,
+        "no_skip_connections": args.no_skip_connections,
+        "no_value_residual": args.no_value_residual,
+        "no_key_offset": args.no_key_offset,
+        "rope_variant": args.rope_variant,
     }
     with open(result_path, "w") as f:
         json.dump(result, f, indent=2)
