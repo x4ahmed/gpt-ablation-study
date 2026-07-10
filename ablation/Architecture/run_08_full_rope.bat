@@ -34,4 +34,5 @@ python arch_ablations/train.py ^
   --input_bin fineweb_data/fineweb_train.pt ^
   --input_val_bin fineweb_data/fineweb_val.pt ^
   --total-batch-size 16384 ^
-  --rope-variant full
+  --rope-variant full ^
+  --no-key-offset

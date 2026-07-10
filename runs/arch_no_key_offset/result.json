@@ -1,0 +1,18 @@
+{
+  "matrix_lr": 0.032,
+  "scalar_lr": 0.2,
+  "embedding_lr": 0.12,
+  "unembedding_lr": 0.0008,
+  "lr_multiplier": 0.8,
+  "weight_decay": 0.8,
+  "num_epochs": 16,
+  "val_loss": 4.777764992635758,
+  "best_val_loss": 4.777764992635758,
+  "wandb_url": "https://wandb.ai/i-learn/slowrun/runs/yy4bgdei",
+  "no_attn_gate": false,
+  "attn_gate_variant": "sigmoid",
+  "no_skip_connections": false,
+  "no_value_residual": false,
+  "no_key_offset": true,
+  "rope_variant": "half"
+}
