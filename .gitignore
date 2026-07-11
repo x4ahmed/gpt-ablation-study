@@ -12,3 +12,16 @@ experiments.md
 scripts/
 */runs/*/model.pt
 h100_runs/fineweb_data/
+
+# Presentation: track only TeX sources and reusable figure/table assets.
+# LaTeX build outputs (.aux, .log, .nav, .pdf, etc.) stay local.
+presentation/*
+!presentation/*.tex
+!presentation/*.bib
+!presentation/rules.pdf
+!presentation/figures/
+!presentation/figures/**
+!presentation/tables/
+!presentation/tables/**
+!presentation/resources/
+!presentation/resources/**
