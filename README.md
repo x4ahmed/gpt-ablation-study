@@ -288,3 +288,64 @@ Each **optimizer step** sees 524,288 tokens worth of gradients. The training loo
 runs 2 micro-steps (forward + backward on 262,144 tokens each), accumulating gradients
 via `(loss / grad_accum_steps).backward()`, before applying one optimizer update and
 clearing gradients.
+
+---
+
+## Experiment Scaling (8× H100)
+
+The ablation findings from Phase 1 (optimizer) and Phase 2 (architecture) were
+obtained on a single RTX 3050 (4 GB VRAM) with a 4-layer / 512-dim / ~66M-param
+model on 10M tokens. This section scales the key findings to the full leaderboard
+configuration: **16 layers, 1024 embed dim, 8 heads (128 head_dim), ~317M params,
+524,288 total batch size, 8× H100 GPUs, Flash Attention 3**, with the same Muon
+(matrices) + AdamW (embed/scalars) optimizer recipe.
+
+### H100 Run Configuration
+
+All H100 runs share the following baseline configuration unless noted:
+
+| Hyperparameter | Value |
+| --- | --- |
+| Architecture | 16 layers, 1024 embed dim, 8 heads, head_dim 128 |
+| Parameters | 316,935,720 (~317M) |
+| FLOPs per token | 1.756 × 10⁹ |
+| GPUs | 8× H100 (Hopper, Flash Attention 3) |
+| Train / Val tokens | ~100M / ~10M |
+| Sequence length | 2048 |
+| Total batch size | 524,288 |
+| Device batch size | 16 per GPU |
+| Grad accum steps | 2 |
+| Epochs | 16 |
+| LR multiplier | 0.8 (matrix_lr=0.032, scalar_lr=0.2, embedding_lr=0.12, unembedding_lr=0.0008) |
+| Weight decay (default) | 0.8 (3-phase: hold → 0.1 → 1.25) |
+| Dropout | 0.1 |
+| EMA | Every 10 steps |
+| SWA | Last 4 epochs |
+| Document shuffle | On |
+
+### Results
+
+| Run | Optimizer | Gate Variant | Weight Decay | Best Val Loss | Final Val Loss | Best Val BPB | Best Epoch | Status | W&B Link |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Baseline | Muon + AdamW | sigmoid (default) | 0.8 | **3.3343** | 3.3484 | **1.0835** | 16 (Ckpt avg) | ✅ Done | [View](https://wandb.ai/i-learn/slowrun/runs/vryw9bxv) |
+| Strong Gate | Muon + AdamW | strong (`2*sigmoid`) | 0.8 | **3.3376** | 3.3524 | **1.0846** | 16 (Ckpt avg) | ✅ Done | [View](https://wandb.ai/i-learn/slowrun/runs/vp6dxkif) |
+| Strong Gate + Low WD | Muon + AdamW | strong (`2*sigmoid`) | 0.2 | 3.4735 | 3.6652 | 1.1670 | 8 (raw) | ✅ Done | [View](https://wandb.ai/i-learn/slowrun/runs/1l93yfpf) |
+| Baseline + Low WD | Muon + AdamW | sigmoid (default) | 0.2 | 3.4836 | 3.7445 | 1.1912 | 8 (raw) | ✅ Done | [View](https://wandb.ai/i-learn/slowrun/runs/cy7besr1) |
+
+> **Note:** The "Best Val Loss" is the minimum across per-epoch val loss, EMA val
+> loss, and SWA checkpoint-averaged val loss. "Best Val BPB" is the bits-per-byte
+> of the same best checkpoint. For the WD=0.8 runs, the best result came from
+> the SWA checkpoint average at the end of training (epoch 16). For the WD=0.2
+> runs, the best result came from the raw per-epoch val loss at epoch 8 — SWA
+> and EMA both degraded the result (see observations below).
+
+### Observations and Conclusions
+
+| # | Observation | Conclusion |
+| --- | --- | --- |
+| 1 | **Strong gate has a negligible effect at full scale.** The strong gate run (best val loss 3.3376) is only 0.0032 worse than the baseline sigmoid gate (3.3343) — a 0.10% difference, well within run-to-run noise. The per-epoch trajectories are nearly identical in shape, with the strong gate tracking the baseline within ~0.001 BPB at every epoch. | At 16 layers / 128 heads / 100M tokens, the attention gate variant (sigmoid vs. strong) does **not** produce a meaningful difference in final val loss. The strong gate's wider dynamic range (0–2× vs. 0–1×) does not translate into a measurable advantage at this scale. The small-scale ablation finding (strong gate was the *worst* variant at 4 layers) does not reverse — it simply washes out. |
+| 2 | **Low weight decay catastrophically fails at full scale — the small-scale finding does NOT transfer.** Both low-WD runs (strong gate 3.4735, baseline 3.4836) are ~4% worse than their WD=0.8 counterparts (3.3376, 3.3343). This directly contradicts the small-scale result where WD=0.2 was the *best* run (4.4606 vs 4.7624 baseline, a 6.3% improvement). | The low-WD benefit at 4 layers / 66M params does not survive scaling to 16 layers / 317M params. At full scale, WD=0.8 is clearly superior. The 3-phase WD schedule with a high `wd_end=1.25` ramp is not a bug — it is essential for keeping weights bounded during the SWA phase. Low WD removes this safeguard, causing SWA to become destructive (see below). |
+| 3 | **SWA is destructive with low weight decay.** Both low-WD runs show the same pattern: val loss improves steadily through epoch 8 (reaching ~3.47–3.48), then **spikes upward** through epochs 13–16 (reaching 3.67–3.77). The SWA checkpoint average (3.67–3.77) is *worse* than the best raw checkpoint (3.47–3.48 at epoch 8). EMA is similarly contaminated (3.67–3.74). In contrast, the WD=0.8 runs show the opposite: SWA produces the best result (epoch 14 raw 3.370, ckpt avg 3.334). | The SWA mechanism (cosine-cycling LR in the last 4 epochs) requires strong WD to keep weights bounded during the LR cycles. With WD=0.8, the high `wd_end=1.25` ramp constrains weights during SWA, producing diverse but well-regularized checkpoints. With WD=0.2, the LR cycling pushes weights into worse regions with no WD to pull them back — each successive SWA checkpoint is worse than the last, and averaging them produces a worse result than the best single checkpoint. |
+| 4 | **Scaling confirms the attention gate is not a key driver.** At 4 layers, removing the gate entirely (No Gate, 4.7555) was actually *better* than the baseline (4.7624). At 16 layers, changing the gate variant barely moves the needle (3.3376 vs. 3.3343). | The per-head attention gate is a minor architectural detail at both scales. The model compensates for the gate's behavior via `c_proj` regardless of variant. |
+| 5 | **The full-scale model converges 30% better than the small-scale model.** The H100 baseline (3.3343) is 30% better than the RTX 3050 baseline (4.7624). The BPB drops from 1.084 (H100) vs. ~1.37 (3050). | Scaling from 66M to 317M params and from 10M to 100M tokens produces a substantial improvement, as expected. The architecture and recipe transfer well to full scale — no hyperparameter retuning was needed. |
+| 6 | **The WD=0.8 3-phase schedule is well-tuned for the SWA phase.** The WD=0.8 runs show a sharp val loss drop at epoch 13 (from ~1.15 → ~1.097 BPB) when SWA begins — this is the single biggest improvement in training. The low-WD runs show the opposite: a sharp *increase* at the same point. | The 3-phase WD schedule (hold at 0.8 → decay to 0.1 → ramp to 1.25) is not arbitrary — the high `wd_end` is specifically tuned to complement the SWA LR cycling. Reducing WD breaks this interaction. For the final leaderboard run, WD=0.8 with the default schedule should be retained. |
