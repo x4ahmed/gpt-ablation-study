@@ -46,7 +46,84 @@ establish a fair comparison with the H100 baseline run.
 | Run              | Best Val Loss | Final Val Loss | Train Loss | Best Epoch | Tokens/sec | Peak VRAM | Wall-clock | Status  | W&B Link |
 | ---------------- | ------------- | -------------- | ---------- | ---------- | ---------- | --------- | ---------- | ------- | -------- |
 | Muon + AdamW     | 4.7624        | 4.8851         | 4.6681     | 13 (EMA)   | 6,432      | 4,717 MiB | 429.0m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/3pzf3l2k) |
-| AdamW only       | —             | —              | —          | —          | —          | —         | —          | Pending | —        |
+| AdamW only       | 6.1809        | NaN            | 6.1400     | 2 (raw)    | ~6,500     | 4,717 MiB | ~358m      | Diverged | [View](https://wandb.ai/i-learn/slowrun/runs/hac9lp4b) |
+| AdamW (low LR)   | 4.8975        | 5.0426         | 4.8525     | 16 (EMA)   | 6,684      | 4,780 MiB | 414.9m     | Done    | [View](https://wandb.ai/i-learn/slowrun/runs/p5rnu5bp) |
+
+### AdamW Divergence Analysis
+
+The AdamW-only run diverged at **step 1,626** (~16.6% through training) due to
+**exploding gradients**. The sequence of events was:
+
+1. **Steps 0–610 (Epoch 1):** Training progressed normally. Loss decreased from
+   10.83 → 6.26. Val loss after epoch 1: 6.357.
+2. **Steps 610–1,220 (Epoch 2):** Loss continued decreasing to ~6.12. Val loss
+   after epoch 2: 6.181 — the best val loss recorded.
+3. **Steps 1,220–1,625 (Epoch 3):** Loss plateaued around 6.0–6.2, with
+   increasing instability. Several steps showed loss spikes (e.g., step 1,598:
+   6.240, step 1,620: 6.243). The step times also increased dramatically (from
+   ~2,400ms to ~4,000ms), suggesting the GPU was struggling with increasingly
+   large gradient values.
+4. **Step 1,626:** A gradient spike exceeded AdamW's numerical stability
+   threshold. The momentum buffer amplified the spike instead of normalizing it,
+   producing an update so large it caused numerical overflow → `inf` → `NaN`.
+5. **Steps 1,626–2,036+:** All subsequent losses are `NaN`. Once any weight
+   becomes NaN, every forward pass produces NaN permanently — the model is
+   irrecoverably corrupted.
+
+**Root cause:** The matrix learning rate (`0.032 = 0.04 × 0.8`) is too
+aggressive for AdamW. Muon handles this LR safely because its Polar Express
+orthogonalization normalizes the gradient to unit norm before applying the
+update — no matter how large the raw gradient spike, the effective step size is
+bounded. AdamW has no such safeguard: the raw gradient flows directly through
+the momentum buffer, and a spike gets amplified rather than dampened.
+
+**Key finding:** This demonstrates that **Muon's gradient normalization is a
+critical stability advantage**, not just a performance optimization. The same
+learning rate that trains stably for 9,760 steps with Muon causes catastrophic
+divergence with AdamW at step 1,626. This is a direct, controlled comparison —
+the only difference between the two runs is the optimizer, confirming that
+Muon's orthogonalization is what prevents the explosion.
+
+### AdamW Low LR Analysis
+
+After the AdamW divergence at `lr_multiplier=0.8` (matrix_lr=0.032), a second
+run was attempted with `lr_multiplier=0.6` (matrix_lr=0.024) — the original
+default in the code. This run completed all 16 epochs without divergence.
+
+| Metric | Muon + AdamW (lr_mult=0.8) | AdamW only (lr_mult=0.8) | AdamW low LR (lr_mult=0.6) |
+| --- | --- | --- | --- |
+| Best Val Loss | 4.7624 | Diverged (NaN) | 4.8975 |
+| Final Val Loss | 4.8851 | NaN | 5.0426 |
+| Train Loss | 4.6681 | 6.1400 | 4.8525 |
+| Best Epoch | 13 (EMA) | 2 (raw) | 16 (EMA) |
+| Status | Done | Diverged at step 1,626 | Done |
+
+**Key findings:**
+
+1. **Stability achieved:** Lowering the LR multiplier from 0.8 to 0.6 prevented
+   the gradient explosion, confirming the root cause was an LR too aggressive
+   for AdamW (which lacks Muon's gradient normalization).
+
+2. **Muon still wins by 0.135:** Even with a stable LR, AdamW (4.8975) is worse
+   than Muon+AdamW (4.7624) by 0.1351 (2.8%). This gap is substantial — larger
+   than any architecture ablation result (the largest arch ablation was No Value
+   Residual at 0.046). This means the optimizer choice matters more than any
+   single architectural component at this scale.
+
+3. **Best epoch at 16 (EMA):** AdamW's best val loss came from the final EMA
+   evaluation, not from any per-epoch checkpoint. This suggests AdamW's training
+   was still improving at the end — the model hadn't fully converged, possibly
+   because the lower LR slowed learning.
+
+4. **Higher peak VRAM (4,780 vs 4,717 MiB):** The AdamW run used slightly more
+   memory, likely because AdamW maintains both first and second moment buffers
+   (`exp_avg` + `exp_avg_sq`) for all parameters, while Muon uses different
+   buffers (`momentum_buffer` + `second_momentum_buffer`) that may be more
+   memory-efficient for matrix parameters.
+
+5. **Faster wall-clock (414.9m vs 429.0m):** Despite worse val loss, AdamW was
+   ~14 minutes faster. Muon's Polar Express orthogonalization adds compute
+   overhead (5 Newton-Schulz iterations per step) that AdamW avoids.
 
 ## Hardware & Environment
 
@@ -186,3 +263,28 @@ below is changed per run; all other hyperparameters remain fixed.
 | **No Value Residual** | `--no-value-residual` | `ve_projs` (2× Linear 512→512) and `ve_gate` (2× Linear 32→8) removed; value stream `v` is not augmented with projected `x0`. ResFormer disabled | 65,143,178 | −524,800 | Largest param reduction. `ve_projs` removed from Muon matrix groups, `ve_gate` removed from AdamW. `GPT.forward()` passes `ve=None` to all blocks. EMA/SWA operate on fewer params. | **Largest degradation of all ablations.** Best val loss 4.8079 vs baseline 4.7624 — worse by 0.0456 (0.96%), more than double the next-worst ablation (Strong Gate at 0.37%). This is the only ablation that removes a substantial number of parameters (524,800, 0.8% of the model) AND the only one that shows a clear signal beyond noise at this scale. The ResFormer value embeddings provide a direct gated path from the original input `x0` into the value stream on alternating layers, acting as both an information shortcut and a gradient highway. Even at 4 layers, removing this path measurably hurts — the model loses access to the raw embedding signal in deeper layers and must rely solely on the residual stream. This strongly suggests value residuals are the most important architectural component in the recipe, and their contribution will likely *grow* at 16 layers where the distance from `x0` to deeper layers is much greater. |
 | **No Key Offset** | `--no-key-offset` | Partial key shift disabled on long-window and last layers; stationary dims of `k` are no longer shifted forward by 1 | 65,667,978 | 0 | No params removed. Only `CausalSelfAttention.forward()` skips the `k[:, 1:, ...]` shift. Optimizer, EMA, SWA all unchanged. | **Small but measurable degradation.** Best val loss 4.7778 vs baseline 4.7624 — worse by 0.0154 (0.32%), placing it between Identity Gate (0.25%) and Strong Gate (0.37%). The partial key offset shifts the stationary (non-rotated) half of keys forward by 1 on long-window and final layers, providing a minimal form of positional information in the dimensions that RoPE leaves untouched. Removing it causes a small but consistent degradation — larger than the No Gate and No U-Net ablations (both <0.04%), suggesting the key offset contributes something real even at this scale. At 16 layers with more long-window layers (the SSSL pattern repeats more times), the key offset would apply to more layers and likely matter more. |
 | **Full RoPE** | `--rope-variant full --no-key-offset` | `_precompute_rotary` rotates all `head_dim//2=32` frequency pairs instead of `head_dim//4=16` pairs with zero-padding. Standard RoPE. Key offset also disabled (incompatible with full rotation — would corrupt rotated dims). | 65,667,978 | 0 | No params removed. Only `cos`/`sin` buffers differ (all dims rotated vs. half stationary). Key offset disabled since it shifts the second half of head dim, which is stationary in half-truncated but rotated in full RoPE. Optimizer, EMA, SWA all unchanged. | **Slightly worse than baseline.** Best val loss 4.7708 vs baseline 4.7624 — worse by 0.0084 (0.18%), within the noise band alongside No Gate (−0.14%) and No U-Net Skips (+0.04%). The half-truncated RoPE was a deliberate design choice: rotating only `head_dim//4` frequency pairs leaves more dims stationary for content matching, which appears to be beneficial even at this scale. Full RoPE rotates all dims, providing richer positional encoding but at the cost of less content-preserving capacity. The notably lower tokens/sec (4,639 vs baseline 6,432) is due to the longer epoch time (1,722s vs ~1,600s), not a param difference. At full scale (16 layers, 1024 dim), the tradeoff between positional richness and content preservation may shift — more layers can distribute positional vs. content information more effectively, potentially making full RoPE more competitive. |
+
+---
+
+## Batch Size Calculation (8×H100)
+
+The effective batch size is controlled by `--total-batch-size`, while `--device-batch-size`
+controls how many sequences each GPU processes per forward pass. Gradient accumulation
+bridges the gap:
+
+```
+device_batch_size = 16 sequences per GPU
+seq_len           = 2048 tokens per sequence
+world_size        = 8 GPUs
+
+tokens_per_micro_step = 16 × 2048 × 8 = 262,144 tokens
+
+total_batch_size  = 524,288 tokens (effective batch per optimizer step)
+
+grad_accum_steps  = 524,288 ÷ 262,144 = 2
+```
+
+Each **optimizer step** sees 524,288 tokens worth of gradients. The training loop
+runs 2 micro-steps (forward + backward on 262,144 tokens each), accumulating gradients
+via `(loss / grad_accum_steps).backward()`, before applying one optimizer update and
+clearing gradients.

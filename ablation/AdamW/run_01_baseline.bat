@@ -25,12 +25,12 @@ echo.
 echo Running AdamW baseline experiment...
 echo.
 python adam_runs/train.py ^
-  --run-name adam_baseline ^
+  --run-name adam_baseline_low_lr ^
   --wandb_entity i-learn ^
   --no_torch_compile ^
   --n_layer 4 --n_embd 512 --n_head 8 ^
   --device-batch-size 2 --num-epochs 16 ^
-  --lr_multiplier 0.8 --weight-decay 0.8 --dropout 0.1 ^
+  --lr_multiplier 0.6 --weight-decay 0.8 --dropout 0.1 ^
   --input_bin fineweb_data/fineweb_train.pt ^
   --input_val_bin fineweb_data/fineweb_val.pt ^
   --total-batch-size 16384
