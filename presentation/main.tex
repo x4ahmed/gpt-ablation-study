@@ -73,8 +73,21 @@
 
 \newcommand{\smallcite}[1]{\hfill{\tiny\color{gray}#1}}
 
+\newcommand{\sectiondivider}[1]{%
+  \vspace*{-0.52cm}%
+  \hfill\includegraphics[width=0.16\paperwidth]{figures/hhu-logo.png}\par
+  \vfill
+  \begin{center}
+    {\LARGE\bfseries\color{hhublue}#1\par}
+    \vspace{0.28cm}
+    {\color{hhublue}\rule{3.1cm}{1.2pt}}
+  \end{center}
+  \vfill
+  \vspace*{0.55cm}%
+}
+
 \title[GPT-Slowrun Ablation Study]{Ablation Study of a NanoGPT Slowrun Model}
-\subtitle{Optimizer, architecture, and scale transfer in the Tiny Track}
+\subtitle{Optimizer, Architecture, and Scaling in nanoGPT Slowrun}
 \author{Ahmed Moustafa}
 \institute{}
 \date{Summer Semester 2026}
@@ -92,15 +105,14 @@
   \begin{tikzpicture}[remember picture,overlay]
     \node[anchor=north east,inner sep=0pt]
       at ([xshift=-0.22cm,yshift=-0.18cm]current page.north east)
-      {\includegraphics[width=0.13\paperwidth]{figures/hhu-logo.png}};
+      {\includegraphics[width=0.16\paperwidth]{figures/hhu-logo.png}};
   \end{tikzpicture}
-  \begin{minipage}[t][0.86\paperheight][t]{0.53\textwidth}
+  \begin{minipage}[t][0.86\paperheight][t]{0.65\textwidth}
     \vspace{0.75cm}
     {\usebeamerfont{title}\color{hhublue}
      Ablation Study of a\\[0.12cm]NanoGPT Slowrun Model\par}
     \vspace{0.40cm}
-    {\normalsize Optimizer, architecture, and scale transfer\\
-     in the NanoGPT Slowrun Tiny Track\par}
+    {\normalsize Optimizer, Architecture, and Scaling in NanoGPT Slowrun\par}
 
     \vspace{0.52cm}
     {\color{hhublue}\rule{1.2cm}{1.1pt}}\\[0.22cm]
@@ -112,6 +124,10 @@
   \end{minipage}
 \end{frame}
 }
+
+\begin{frame}
+  \sectiondivider{Introduction}
+\end{frame}
 
 \begin{frame}{Problem Statement}
   \begin{columns}[T,onlytextwidth]
@@ -125,7 +141,7 @@
       \end{block}
     \column{0.49\textwidth}
       \begin{block}{Tiny Track used here}
-        \begin{itemize}
+        \begin{itemize}                                 
           \item approximately 300M-parameter GPT recipe
           \item designed for a single 8$\times$H100 node
           \item Muon, modern attention components, EMA, and SWA
@@ -143,19 +159,20 @@
 \begin{frame}{Research Question}
   \begin{center}
     \Large Can a 4-layer model on one laptop GPU identify choices that remain
-    useful for a 16-layer model on 8 H100 GPUs?
+    useful for a 16-layer model on 8xH100 GPUs?
   \end{center}
   \vspace{0.5cm}
   \begin{columns}[T]
     \column{0.48\textwidth}
-      \textbf{Phase 1: inexpensive screening}
+      \textbf{Stage 1: inexpensive screening}
       \begin{itemize}
         \item 66M parameters, 10M train tokens
-        \item optimizer and hyperparameter ablations
-        \item architectural component removal
+        \item Phase 1: Optimizer ablations
+        \item Phase 2: Hyperparameter ablations
+        \item Phase 3: Architectural component removal
       \end{itemize}
     \column{0.48\textwidth}
-      \textbf{Phase 2: scaling test}
+      \textbf{Stage 2: scaling test}
       \begin{itemize}
         \item 317M parameters, 100M train tokens
         \item four 8$\times$H100 runs
@@ -178,7 +195,7 @@
 % -----------------------------------------------------------------------------
 % Method / technical insight: target > 50% of speaking time
 % -----------------------------------------------------------------------------
-\begin{frame}{Leaderboard Architecture}
+\begin{frame}{Baseline Architecture}
   \small
   \begin{tabular}{>{\bfseries}p{0.22\textwidth}p{0.70\textwidth}}
     \toprule
@@ -199,7 +216,7 @@
   \end{center}
 \end{frame}
 
-\begin{frame}{Baseline Architecture}
+\begin{frame}{Baseline Diagram}
   {\centering
     \includegraphics[width=0.965\textwidth,height=0.765\textheight,keepaspectratio]
       {figures/gpt-detailed.png}
@@ -232,26 +249,136 @@
   \end{block}
 \end{frame}
 
-\begin{frame}{Value Residuals}
-  \begin{columns}[c]
-    \column{0.54\textwidth}
-      Standard value projection:
-      \[
-        V_\ell = X_\ell W^V_\ell
-      \]
-      Value-residual variant used here:
-      \[
-        \widetilde{V}_\ell = V_\ell + g_\ell(X_\ell)\odot P_\ell(X_0)
-      \]
-      The initial token representation remains directly accessible to later
-      attention layers.
-    \column{0.42\textwidth}
-      \begin{block}{Why ablate it?}
-        It adds both a new information path and about 0.8\% more parameters at
-        small scale. A loss change cannot be attributed to connectivity alone.
-      \end{block}
-  \end{columns}
-  \smallcite{Value residual learning / ResFormer \cite{zhou2024resformer}}
+\begin{frame}{Training Schedule}
+  \small
+  \begin{tabular}{p{0.18\textwidth}p{0.14\textwidth}p{0.59\textwidth}}
+    \toprule
+    Phase & Epochs & Training behavior \\
+    \midrule
+    Hold & 1--2 & keep the configured weight decay fixed \\
+    Decay & 3--8 & reduce weight decay toward 0.1 \\
+    Late ramp & 9--12 & increase weight decay toward the final value 1.25 \\
+    SWA window & 13--16 & continue the ramp; restart a cosine LR cycle each
+      epoch and retain one checkpoint \\
+    \bottomrule
+  \end{tabular}
+  \par
+  \vspace{0.45cm}
+  \begin{itemize}
+    \item EMA tracks the parameters throughout training with updates every 10 steps.
+    \item The four SWA-window checkpoints are combined only after training.
+  \end{itemize}
+  \vspace{0.2cm}
+  \begin{block}{Why the schedule matters}
+    Weight decay and checkpoint averaging interact strongly during epochs 13--16.
+  \end{block}
+\end{frame}
+
+\begin{frame}{Raw Validation Loss}
+  \small
+  At the end of epoch $e$, the current raw model weights are denoted by $\theta_e$;
+  $E=16$ denotes the final epoch.
+
+  \vspace{0.45cm}
+  \textbf{1. Per-token negative log-likelihood}
+  \[
+    \mathrm{CE}_i(\theta_e)=-\log p_{\theta_e}(t_i\mid t_{<i})
+  \]
+  The model is penalized when it assigns low probability to the observed next token $t_i$.
+
+  \vspace{0.4cm}
+  \textbf{2. Padding-masked mean}
+  \[
+    m_i=\mathbb{1}[t_i\neq\mathrm{PAD}],
+    \qquad
+    \mathcal{L}_{\mathrm{val}}(\theta_e)=
+    \frac{\sum_i \mathrm{CE}_i(\theta_e)m_i}{\sum_i m_i}
+  \]
+  Padding contributes neither loss nor token count; lower validation loss is better.
+
+  \vspace{0.35cm}
+  \begin{block}{Raw candidates}
+    The values $\mathcal{L}_{\mathrm{val}}(\theta_e)$ for epochs $e=1,\ldots,E$
+    are the raw candidates used on the next slide.
+  \end{block}
+\end{frame}
+
+\begin{frame}{Best Validation Loss}
+  \small
+  \textbf{1. Final EMA candidate}
+  \[
+    \bar\theta_s=\beta\bar\theta_{s-1}+(1-\beta)\theta_s,
+    \qquad s=1,\ldots,S
+  \]
+  Here $s$ indexes optimizer steps and $S$ is the final training step; evaluate
+  $\mathcal{L}_{\mathrm{val}}(\bar\theta_S)$ once after training.
+
+  \vspace{0.3cm}
+  \textbf{2. Last-four checkpoint-average candidate}
+  \[
+    \theta_{\mathrm{avg}}
+      =\sum_{j=1}^{4}\frac{j}{10}\,\theta_{E-4+j}
+      =\frac{1\theta_{E-3}+2\theta_{E-2}+3\theta_{E-1}+4\theta_E}{10}
+  \]
+  Thus the most recent raw checkpoint receives the largest weight.
+
+  \vspace{0.3cm}
+  \textbf{3. Reported best validation loss}
+  \[
+    \mathcal{L}_{\mathrm{best}}=\min\!\left\{
+      \min_{1\le e\le E}\mathcal{L}_{\mathrm{val}}(\theta_e),
+      \mathcal{L}_{\mathrm{val}}(\bar\theta_S),
+      \mathcal{L}_{\mathrm{val}}(\theta_{\mathrm{avg}})
+    \right\}
+  \]
+  Report the minimum value together with its source: raw epoch, EMA, or checkpoint average.
+\end{frame}
+
+\begin{frame}{Ablation Study Outline}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.25}
+  {\large\color{hhublue}\textbf{Stage 1: Small-scale screening}\par}
+  \vspace{0.2cm}
+  \begin{tabular}{>{\raggedright\arraybackslash}p{0.30\textwidth}
+                  >{\raggedright\arraybackslash}p{0.30\textwidth}
+                  >{\raggedright\arraybackslash}p{0.30\textwidth}}
+    \toprule
+    \multicolumn{1}{c}{\textbf{Phase 1}} &
+    \multicolumn{1}{c}{\textbf{Phase 2}} &
+    \multicolumn{1}{c}{\textbf{Phase 3}} \\
+    \midrule
+    \textbf{Optimizer} &
+    \textbf{Hyperparameters} &
+    \textbf{Architecture} \\
+    Muon+AdamW versus AdamW-only &
+    LR, weight decay, dropout, shuffle &
+    Gates, U-Net, value residuals, key offset, RoPE \\
+    \emph{Goal: stability and validation loss} &
+    \emph{Goal: training-recipe sensitivity} &
+    \emph{Goal: component contribution} \\
+    \bottomrule
+  \end{tabular}
+  \par
+  \vspace{0.55cm}
+  {\large\color{hhublue}\textbf{Stage 2: Scale transfer}\par}
+  \vspace{0.2cm}
+  \begin{tabular}{>{\raggedright\arraybackslash}p{0.44\textwidth}
+                  >{\raggedright\arraybackslash}p{0.46\textwidth}}
+    \toprule
+    \textbf{Scaling test} & \textbf{Question} \\
+    \midrule
+    66M laptop model $\rightarrow$ 317M model on 8 H100s &
+    Do the small-scale findings survive the change in model, data, and batch size? \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+% -----------------------------------------------------------------------------
+% Experiments: target 20--30% of speaking time
+% -----------------------------------------------------------------------------
+\begin{frame}
+  \sectiondivider{Phase 1: Optimizer Ablation}
 \end{frame}
 
 \begin{frame}{Muon Optimizer}
@@ -300,158 +427,6 @@
   \smallcite{AdamW \cite{loshchilov2019adamw}; Muon parameter grouping \cite{jordan2024muon}}
 \end{frame}
 
-\begin{frame}{Training Schedule}
-  \begin{columns}[T]
-    \column{0.52\textwidth}
-      \textbf{Weight decay schedule}
-      \begin{enumerate}
-        \item hold the configured value through epoch 2
-        \item decay toward 0.1 through epoch 8
-        \item ramp toward 1.25 by epoch 16
-      \end{enumerate}
-      \textbf{Last four epochs}
-      \begin{itemize}
-        \item cosine LR cycles create diverse checkpoints
-        \item recency-weighted checkpoint average
-      \end{itemize}
-    \column{0.44\textwidth}
-      \textbf{EMA weights}
-      \[
-        \bar\theta_t = \beta\bar\theta_{t-1}+(1-\beta)\theta_t
-      \]
-      \textbf{Checkpoint average}
-      \[
-        \theta_{\mathrm{avg}}=\sum_{j=1}^{4}
-        \frac{j}{1+2+3+4}\theta_j
-      \]
-  \end{columns}
-  \vspace{0.3cm}
-  These mechanisms interact; weight decay cannot be interpreted independently
-  of the late-training schedule.
-\end{frame}
-
-\begin{frame}{Checkpoint Averaging}
-  \small
-  Token-level cross-entropy masks padding and uses the same held-out data for
-  every run:
-  \[
-    \mathcal{L}_{\mathrm{val}}=
-    \frac{\sum_i \mathrm{CE}_i\,\mathbb{1}[t_i\neq\mathrm{PAD}]}
-         {\sum_i \mathbb{1}[t_i\neq\mathrm{PAD}]}
-  \]
-  \begin{columns}[T]
-    \column{0.32\textwidth}
-      \textbf{Raw}\par
-      End of every epoch
-    \column{0.32\textwidth}
-      \textbf{EMA}\par
-      Evaluated after training
-    \column{0.32\textwidth}
-      \textbf{Checkpoint average}\par
-      Last four epochs
-  \end{columns}
-  \vspace{0.5cm}
-  \begin{block}{Reported ``best'' loss}
-    Minimum over raw epoch checkpoints, EMA, and checkpoint average. The winning
-    checkpoint type is always reported alongside the value.
-  \end{block}
-\end{frame}
-
-\begin{frame}{Evaluation Metric}
-  \begin{columns}[c]
-    \column{0.47\textwidth}
-      \textbf{Per-token negative log-likelihood}
-      \[
-        \ell_i=-\log p_\theta(t_i\mid t_{<i})
-      \]
-      \textbf{Masked validation loss}
-      \[
-        \mathcal{L}_{\mathrm{val}}=
-        \frac{\sum_i \ell_i\,m_i}{\sum_i m_i},
-        \qquad m_i=\mathbb{1}[t_i\neq\mathrm{PAD}]
-      \]
-    \column{0.49\textwidth}
-      \setlength{\fboxsep}{8pt}%
-      \fcolorbox{hhublue}{hhulight}{%
-        \parbox[c][0.34\textheight][c]{0.88\linewidth}{%
-          \centering\large\bfseries Metric diagram placeholder\\[0.5em]
-          \scriptsize Show input tokens and shifted targets, one highlighted
-          next-token probability, padding masked out, and three model-weight
-          sources feeding the same evaluator: raw, EMA, and checkpoint average.
-        }%
-      }
-  \end{columns}
-  \vspace{0.35cm}
-  Lower loss means the model assigns more probability to the observed validation tokens.
-\end{frame}
-
-\begin{frame}{Ablation Study Outline}
-  \small
-  \begin{columns}[T]
-    \column{0.47\textwidth}
-      \textbf{Training recipe ablations}
-      \begin{itemize}
-        \item LR multiplier: 0.4, 0.8, 1.0
-        \item weight decay: 0.2, 0.8, 1.2
-        \item dropout: 0.0, 0.1, 0.2
-        \item document shuffle: on / off
-        \item Muon+AdamW versus AdamW-only
-      \end{itemize}
-    \column{0.49\textwidth}
-      \textbf{Architecture ablations}
-      \begin{itemize}
-        \item remove or modify attention gate
-        \item remove U-Net skips
-        \item remove value residuals
-        \item remove partial key offset
-        \item full RoPE plus no key offset
-      \end{itemize}
-  \end{columns}
-  \vspace{0.4cm}
-  \alert{Limitation: one run per configuration means small differences are descriptive, not statistically resolved.}
-\end{frame}
-
-\begin{frame}{Experiment Scaling}
-  \small
-  \begin{tabular}{p{0.31\textwidth}cc}
-    \toprule
-    & Laptop screening & H100 scaling test \\
-    \midrule
-    Transformer & 4 layers, 512 dim & 16 layers, 1024 dim \\
-    Parameters & 65.7M & 316.9M \\
-    Train / validation tokens & 10M / 1M & 100M / 10M \\
-    Sequence length & 2048 & 2048 \\
-    Effective batch tokens & 16,384 & 524,288 \\
-    Hardware & 1$\times$ RTX 3050 4GB & 8$\times$ H100 \\
-    Epochs & 16 & 16 \\
-    \bottomrule
-  \end{tabular}
-  \vspace{0.5cm}
-  Same optimizer family, architecture family, evaluation code, and late-training
-  averaging; model size, data, batch size, and hardware change together.
-\end{frame}
-
-\begin{frame}{Effective Batch Size}
-  \begin{center}
-    \Large
-    $16$ sequences/GPU $\times$ $2048$ tokens $\times$ $8$ GPUs\\[0.3em]
-    $=262{,}144$ tokens per micro-step
-  \end{center}
-  \vspace{0.4cm}
-  \begin{center}
-    Two accumulated micro-steps\\[0.3em]
-    $\Rightarrow 524{,}288$ tokens per optimizer update
-  \end{center}
-  \vspace{0.5cm}
-  \begin{block}{Why this matters}
-    Batch size and model width change the optimization regime. A hyperparameter
-    that wins on the laptop is a hypothesis for scaling, not a guaranteed winner.
-  \end{block}
-\end{frame}
-
-% -----------------------------------------------------------------------------
-% Experiments: target 20--30% of speaking time
-% -----------------------------------------------------------------------------
 \begin{frame}{Phase 1: Optimizer Ablation}
   \small
   \begin{tabular}{p{0.31\textwidth}ccc}
@@ -485,15 +460,19 @@
 \begin{frame}{Optimizer Training Curves}
   \begin{columns}[T,onlytextwidth]
     \column{0.495\textwidth}
-      \includegraphics[width=\linewidth]{figures/graphs/moun_vs_adam_train_loss.png}
+      \includegraphics[width=\linewidth]{figures/graphs/muon_vs_adam_train.png}
     \column{0.495\textwidth}
-      \includegraphics[width=\linewidth]{figures/graphs/moun_vs_adam_val_loss.png}
+      \includegraphics[width=\linewidth]{figures/graphs/muon_vs_adam_val.png}
   \end{columns}
   \vspace{0.25cm}
   \begin{center}
     \small AdamW at LR multiplier 0.8 stops at step 1,626 after producing NaNs;
     Muon remains stable through training.
   \end{center}
+\end{frame}
+
+\begin{frame}
+  \sectiondivider{Phase 2: Hyperparameter Ablation}
 \end{frame}
 
 \begin{frame}{Phase 2: Hyperparameter Ablation}
@@ -512,14 +491,51 @@
     High WD (1.2) & 4.9253 & $+0.1629$ \\
     \bottomrule
   \end{tabular}
-  \vspace{0.3cm}
-  Low WD improves best loss by 6.3\% on the 66M-parameter screen.
+  \par
+  \vspace{0.45cm}
+  \begin{itemize}
+    \item Low WD improves best loss by 6.3\% on the 66M-parameter screen.
+  \end{itemize}
 \end{frame}
 
 \begin{frame}{Hyperparameter Training Curves}
-  \wandbplaceholder
-    {Validation loss by epoch for baseline, LR-low, and WD-low}
-    {Runs: baseline 3pzf3l2k; LR-low 79wkc6pa; WD-low yfhvegka. Use three colors only; distinguish raw epoch loss from final EMA/SWA markers.}
+  \begin{columns}[T,onlytextwidth]
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/hpa_train.png}
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/hpa_val.png}
+  \end{columns}
+
+  \vspace{0.25cm}
+  \begin{center}
+    \small Lower weight decay gives the lowest training and validation loss at small scale.
+  \end{center}
+\end{frame}
+
+\begin{frame}
+  \sectiondivider{Phase 3: Architecture Ablation}
+\end{frame}
+
+\begin{frame}{Value Residuals}
+  \begin{columns}[c]
+    \column{0.54\textwidth}
+      Standard value projection:
+      \[
+        V_\ell = X_\ell W^V_\ell
+      \]
+      Value-residual variant used here:
+      \[
+        \widetilde{V}_\ell = V_\ell + g_\ell(X_\ell)\odot P_\ell(X_0)
+      \]
+      The initial token representation remains directly accessible to later
+      attention layers.
+    \column{0.42\textwidth}
+      \begin{block}{Why ablate it?}
+        It adds both a new information path and about 0.8\% more parameters at
+        small scale. A loss change cannot be attributed to connectivity alone.
+      \end{block}
+  \end{columns}
+  \smallcite{Value residual learning / ResFormer \cite{zhou2024resformer}}
 \end{frame}
 
 \begin{frame}{Phase 3: Architecture Ablation}
@@ -532,14 +548,65 @@
     Baseline & 4.7624 & -- \\
     No U-Net skips & 4.7642 & $+0.0018$ \\
     Full RoPE + no key offset & 4.7708 & $+0.0084$ \\
-    No key offset & 4.7778 & $+0.0154$ \\
+    Half RoPE + no key offset & 4.7778 & $+0.0154$ \\
     Strong gate & 4.7802 & $+0.0178$ \\
     \textbf{No value residual} & \textbf{4.8079} & \textbf{$+0.0456$} \\
     \bottomrule
   \end{tabular}
-  \vspace{0.35cm}
-  Value residual removal gives the largest degradation, but it also removes
-  524,800 parameters. The RoPE comparison changes two components simultaneously.
+  \par
+  \vspace{0.45cm}
+  \begin{itemize}
+    \item Value residual removal gives the largest degradation, but it also
+      removes 524,800 parameters.
+    \item With key offset disabled in both runs, full RoPE is only $0.0070$
+      better than half RoPE; one seed cannot resolve this gap.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \sectiondivider{Scale Transfer}
+\end{frame}
+
+\begin{frame}{Experiment Scaling}
+  \small
+  \begin{tabular}{p{0.31\textwidth}cc}
+    \toprule
+    & Laptop screening & H100 scaling test \\
+    \midrule
+    Transformer & 4 layers, 512 dim & 16 layers, 1024 dim \\
+    Parameters & 65.7M & 316.9M \\
+    Train / validation tokens & 10M / 1M & 100M / 10M \\
+    Sequence length & 2048 & 2048 \\
+    Effective batch tokens & 16,384 & 524,288 \\
+    Hardware & 1$\times$ RTX 3050 4GB & 8$\times$ H100 \\
+    Epochs & 16 & 16 \\
+    \bottomrule
+  \end{tabular}
+  \par
+  \vspace{0.45cm}
+  \begin{itemize}
+    \item The optimizer family, architecture family, evaluation code, and
+      late-training averaging remain consistent.
+    \item Model size, data, effective batch size, and hardware scale together.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Effective Batch Size}
+  \begin{center}
+    \Large
+    $16$ sequences/GPU $\times$ $2048$ tokens $\times$ $8$ GPUs\\[0.3em]
+    $=262{,}144$ tokens per micro-step
+  \end{center}
+  \vspace{0.4cm}
+  \begin{center}
+    Two accumulated micro-steps\\[0.3em]
+    $\Rightarrow 524{,}288$ tokens per optimizer update
+  \end{center}
+  \vspace{0.5cm}
+  \begin{block}{Why this matters}
+    Batch size and model width change the optimization regime. A hyperparameter
+    that wins on the laptop is a hypothesis for scaling, not a guaranteed winner.
+  \end{block}
 \end{frame}
 
 \begin{frame}{Scaled Results}
@@ -551,14 +618,14 @@
     \textbf{Baseline sigmoid gate} & \textbf{0.8} & \textbf{0.8} & \textbf{3.3343} \\
     Strong gate & 0.8 & 0.8 & 3.3376 \\
     Strong gate + low WD & 0.2 & 0.8 & 3.4735 \\
-    Sigmoid gate + low WD & 0.2 & \alert{0.6} & 3.4836 \\
+    Sigmoid gate + low WD & 0.2 & 0.8 & 3.4836 \\
     \bottomrule
   \end{tabular}
   \vspace{0.5cm}
   \begin{itemize}
-    \item The controlled strong-gate pair shows a $+0.1360$ loss penalty from low WD.
+    \item Both controlled pairs reverse the small-scale result: low WD worsens
+      loss by $0.136$--$0.149$.
     \item Gate choice is negligible at WD 0.8: only $0.0033$ difference.
-    \item The sigmoid low-WD run also changes LR, so it is supporting evidence only.
   \end{itemize}
 \end{frame}
 
@@ -593,6 +660,10 @@
   \end{block}
 \end{frame}
 
+\begin{frame}
+  \sectiondivider{Conclusion}
+\end{frame}
+
 \begin{frame}{Training Experience}
   \begin{itemize}
     \item AdamW at matrix LR 0.032 diverged; LR 0.024 completed training.
@@ -615,12 +686,13 @@
     \midrule
     One seed per setting & no empirical variance; sub-percent gaps may be noise \\
     Scale changes together & model, data, batch, hardware, and kernels are not isolated \\
-    Full RoPE confound & key offset is disabled at the same time \\
+    RoPE evidence & controlled no-offset comparison differs by only 0.0070;
+      one seed cannot resolve it \\
     Value-residual ablation & removes both a path and 0.8\% of parameters \\
-    One low-WD run uses LR 0.6 & not a controlled WD-only baseline comparison \\
-    Best-of-many checkpoint metric & optimistic selection across raw/EMA/average \\
+    Checkpoint selection & best across raw/EMA/average is optimistically selected \\
     \bottomrule
   \end{tabular}
+  \par
   \vspace{0.4cm}
   These limitations narrow the claims; they do not erase the controlled
   strong-gate weight-decay reversal or the optimizer stability observation.
