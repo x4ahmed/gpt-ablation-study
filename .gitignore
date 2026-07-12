@@ -25,3 +25,13 @@ presentation/*
 !presentation/tables/**
 !presentation/resources/
 !presentation/resources/**
+
+# Keep resource sources and notes, but do not track generated LaTeX outputs.
+presentation/resources/*.aux
+presentation/resources/*.log
+presentation/resources/*.out
+presentation/resources/*.toc
+presentation/resources/*.synctex.gz
+presentation/resources/*.fls
+presentation/resources/*.fdb_latexmk
+presentation/resources/*.pdf

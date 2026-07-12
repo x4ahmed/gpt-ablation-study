@@ -394,7 +394,7 @@
         \toprule
         \textbf{First moment} & \(m_t=\beta_1m_{t-1}+(1-\beta_1)G_t\) \\
         \textbf{Second moment} & \(v_t=\beta_2v_{t-1}+(1-\beta_2)G_t\odot G_t\) \\
-        \textbf{Adaptive step} & \(\Delta W_t=\dfrac{m_t}{\sqrt{v_t}+\epsilon}\) \\
+        \textbf{Adaptive step} & \(\Delta W_t=m_t/(\sqrt{v_t}+\epsilon)\) \\
         \textbf{Final update} & \(W_{t+1}=W_t-\eta(\Delta W_t+\lambda W_t)\) \\
         \midrule
         \textbf{Key idea} & Independent parameter scaling; no explicit orthogonalization. \\
@@ -414,7 +414,7 @@
                       >{\color{goodgreen}\raggedright\arraybackslash}p{0.65\linewidth}}
         \toprule
         \textbf{Momentum} & \(M_t=\beta M_{t-1}+(1-\beta)G_t\) \\
-        \textbf{Matrix view} & \(M_t=USV^\top\) \\
+        \textbf{Matrix view}\newline\phantom{\textbf{moment}} & \(M_t=USV^\top\) \\
         \textbf{Orthogonalize} & \(O_t\approx UV^\top\) \\
         \textbf{Final update} & \(W_{t+1}=W_t-\eta(O_t+\lambda W_t)\) \\
         \midrule
@@ -422,6 +422,7 @@
         \textbf{Acts on} & Whole 2-D update matrix \\
         \textbf{Core operation} & Momentum + Newton--Schulz orthogonalization \\
         \textbf{Typical effect} & More balanced directional update \\
+        \multicolumn{2}{c}{} \\[-0.75em]
         \bottomrule
       \end{tabular}}
   \end{columns}
@@ -612,6 +613,20 @@
   \end{itemize}
 \end{frame}
 
+\begin{frame}{Architecture Training Curves}
+  \begin{columns}[T,onlytextwidth]
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/arch_train.png}
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/arch_val.png}
+  \end{columns}
+  \vspace{0.25cm}
+  \begin{center}
+    \small Most architecture variants track the baseline closely; removing the
+    value residual produces the largest final validation gap.
+  \end{center}
+\end{frame}
+
 \begin{frame}
   \sectiondivider{Scale Transfer}
 \end{frame}
@@ -736,6 +751,21 @@
   \vspace{0.4cm}
   Reproduction quality is part of the result: each table entry can be traced to
   a stored artifact or W\&B run.
+\end{frame}
+
+\begin{frame}{Training Across All Runs}
+  \begin{columns}[T,onlytextwidth]
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/all_train.png}
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/all_val.png}
+  \end{columns}
+  \vspace{0.25cm}
+  \begin{center}
+    \small All recorded training and validation trajectories, grouped by
+    experiment family. Different scales and run lengths should not be compared
+    as a single controlled ablation.
+  \end{center}
 \end{frame}
 
 \begin{frame}{Limitations}
