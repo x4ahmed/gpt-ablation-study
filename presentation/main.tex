@@ -381,35 +381,58 @@
   \sectiondivider{Phase 1: Optimizer Ablation}
 \end{frame}
 
-\begin{frame}{Muon Optimizer}
-  \begin{columns}[T]
+\begin{frame}{AdamW vs. Muon}
+  \begin{columns}[T,onlytextwidth]
     \column{0.49\textwidth}
-      \textbf{Momentum}
-      \[
-        M_t = \beta M_{t-1} + G_t
-      \]
-      \textbf{Orthogonalized direction}
-      \[
-        O_t \approx M_t(M_t^\top M_t)^{-1/2}
-      \]
-      Five Newton--Schulz-style iterations approximate the polar factor.
-    \column{0.47\textwidth}
-      \textbf{Parameter update}
-      \[
-        W_{t+1}=(1-\eta_t\lambda_t)W_t-\eta_t O_t
-      \]
-      \begin{itemize}
-        \item matrix structure is preserved
-        \item singular directions are rescaled
-        \item computation is more expensive than AdamW
-      \end{itemize}
+      {\large\color{hhublue}\textbf{AdamW}}\par
+      \vspace{0.08cm}
+      {\scriptsize
+      \renewcommand{\arraystretch}{1.08}
+      \setlength{\tabcolsep}{3pt}
+      \begin{tabular}{>{\raggedright\arraybackslash}p{0.27\linewidth}
+                      >{\color{hhublue}\raggedright\arraybackslash}p{0.65\linewidth}}
+        \toprule
+        \textbf{First moment} & \(m_t=\beta_1m_{t-1}+(1-\beta_1)G_t\) \\
+        \textbf{Second moment} & \(v_t=\beta_2v_{t-1}+(1-\beta_2)G_t\odot G_t\) \\
+        \textbf{Adaptive step} & \(\Delta W_t=\dfrac{m_t}{\sqrt{v_t}+\epsilon}\) \\
+        \textbf{Final update} & \(W_{t+1}=W_t-\eta(\Delta W_t+\lambda W_t)\) \\
+        \midrule
+        \textbf{Key idea} & Independent parameter scaling; no explicit orthogonalization. \\
+        \textbf{Acts on} & Per-parameter / element-wise \\
+        \textbf{Core operation} & Adaptive moment normalization \\
+        \textbf{Typical effect} & Scale-sensitive; anisotropy may remain \\
+        \bottomrule
+      \end{tabular}}
+
+    \column{0.49\textwidth}
+      {\large\color{goodgreen}\textbf{Muon}}\par
+      \vspace{0.08cm}
+      {\scriptsize
+      \renewcommand{\arraystretch}{1.08}
+      \setlength{\tabcolsep}{3pt}
+      \begin{tabular}{>{\raggedright\arraybackslash}p{0.27\linewidth}
+                      >{\color{goodgreen}\raggedright\arraybackslash}p{0.65\linewidth}}
+        \toprule
+        \textbf{Momentum} & \(M_t=\beta M_{t-1}+(1-\beta)G_t\) \\
+        \textbf{Matrix view} & \(M_t=USV^\top\) \\
+        \textbf{Orthogonalize} & \(O_t\approx UV^\top\) \\
+        \textbf{Final update} & \(W_{t+1}=W_t-\eta(O_t+\lambda W_t)\) \\
+        \midrule
+        \textbf{Key idea} & Matrix-wise processing approximately balances update directions. \\
+        \textbf{Acts on} & Whole 2-D update matrix \\
+        \textbf{Core operation} & Momentum + Newton--Schulz orthogonalization \\
+        \textbf{Typical effect} & More balanced directional update \\
+        \bottomrule
+      \end{tabular}}
   \end{columns}
-  \smallcite{Muon implementation and algorithm \cite{jordan2024muon}}
+
+  \vspace{0.06cm}
+  \smallcite{AdamW \cite{loshchilov2019adamw}; Muon \cite{jordan2024muon}}
 \end{frame}
 
 \begin{frame}{Hybrid Optimizer}
   \small
-  \begin{tabular}{p{0.31\textwidth}p{0.20\textwidth}p{0.19\textwidth}p{0.20\textwidth}}
+  \begin{tabular}{p{0.29\textwidth}p{0.18\textwidth}p{0.18\textwidth}p{0.19\textwidth}}
     \toprule
     Parameter group & Optimizer & Base LR & LR at multiplier 0.8 \\
     \midrule
@@ -516,26 +539,52 @@
   \sectiondivider{Phase 3: Architecture Ablation}
 \end{frame}
 
-\begin{frame}{Value Residuals}
-  \begin{columns}[c]
-    \column{0.54\textwidth}
-      Standard value projection:
-      \[
-        V_\ell = X_\ell W^V_\ell
-      \]
-      Value-residual variant used here:
-      \[
-        \widetilde{V}_\ell = V_\ell + g_\ell(X_\ell)\odot P_\ell(X_0)
-      \]
-      The initial token representation remains directly accessible to later
-      attention layers.
-    \column{0.42\textwidth}
-      \begin{block}{Why ablate it?}
-        It adds both a new information path and about 0.8\% more parameters at
-        small scale. A loss change cannot be attributed to connectivity alone.
-      \end{block}
-  \end{columns}
-  \smallcite{Value residual learning / ResFormer \cite{zhou2024resformer}}
+\begin{frame}{Architecture Changes}
+  \footnotesize
+  \textbf{Attention gate.}
+  Baseline uses a sigmoid multiplier; strong gate doubles its range; no gate removes it.
+  \makebox[\textwidth][c]{\(
+    y_h'=\sigma(a_h(x))y_h
+    \quad\longrightarrow\quad
+    2\sigma(a_h(x))y_h
+    \quad\text{or}\quad y_h
+  \)}
+  \vspace{0.08cm}\hrule\vspace{0.10cm}
+
+  \textbf{Mirrored U-Net skips.}
+  A decoder layer adds its matching encoder state; no-skip removes that term.
+  \makebox[\textwidth][c]{\(
+    x_\ell \leftarrow x_\ell+s_\ell x_{L-1-\ell}
+    \quad\longrightarrow\quad x_\ell
+  \)}
+  \vspace{0.08cm}\hrule\vspace{0.10cm}
+
+  \textbf{Value residuals.}
+  Alternating layers inject a gated projection of $x_0$; no-value-residual keeps only $X_\ell W_\ell^V$.
+  \makebox[\textwidth][c]{\(
+    \widetilde V_\ell=X_\ell W_\ell^V
+      +2\sigma(g_\ell(X_\ell))\odot P_\ell(x_0)
+    \quad\longrightarrow\quad X_\ell W_\ell^V
+  \)}
+  \vspace{0.08cm}\hrule\vspace{0.10cm}
+
+  \textbf{RoPE coverage.}
+  Half RoPE rotates half of each $Q/K$ head; full RoPE rotates every head dimension.
+  \makebox[\textwidth][c]{\(
+    \operatorname{RoPE}_{1:d_h/2}(Q,K)
+    \quad\longrightarrow\quad
+    \operatorname{RoPE}_{1:d_h}(Q,K)
+  \)}
+  \vspace{0.08cm}\hrule\vspace{0.10cm}
+
+  \textbf{Partial key offset.}
+  Long-window and final layers shift the stationary key half by one token; no-offset leaves it unchanged.
+  \makebox[\textwidth][c]{\(
+    K_{t,\,d_h/2:d_h}\leftarrow K_{t-1,\,d_h/2:d_h}
+    \quad\longrightarrow\quad K_t
+  \)}
+  \vspace{0.04cm}
+  \smallcite{RoPE \cite{su2021roformer}; value residuals \cite{zhou2024resformer}}
 \end{frame}
 
 \begin{frame}{Phase 3: Architecture Ablation}
@@ -611,28 +660,39 @@
 
 \begin{frame}{Scaled Results}
   \small
-  \begin{tabular}{p{0.35\textwidth}ccc}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{p{0.29\textwidth}cccc}
     \toprule
-    H100 configuration & WD & LR mult. & Best val loss \\
+    H100 configuration & WD & LR mult. & Final train loss & Best val loss \\
     \midrule
-    \textbf{Baseline sigmoid gate} & \textbf{0.8} & \textbf{0.8} & \textbf{3.3343} \\
-    Strong gate & 0.8 & 0.8 & 3.3376 \\
-    Strong gate + low WD & 0.2 & 0.8 & 3.4735 \\
-    Sigmoid gate + low WD & 0.2 & 0.8 & 3.4836 \\
+    \textbf{Baseline} & \textbf{0.8} & \textbf{0.8} & 2.9533 & \textbf{3.3343} \\
+    Strong gate & 0.8 & 0.8 & 2.9521 & 3.3376 \\
+    Strong gate + low WD & 0.2 & 0.8 & 2.3208 & 3.4735 \\
+    Baseline + low WD & 0.2 & 0.8 & 2.2568 & 3.4836 \\
     \bottomrule
   \end{tabular}
-  \vspace{0.5cm}
+  \vspace{0.4cm}
   \begin{itemize}
     \item Both controlled pairs reverse the small-scale result: low WD worsens
-      loss by $0.136$--$0.149$.
+      validation loss by $0.136$--$0.149$.
+    \item Low WD clearly causes overfitting: final train loss falls to
+      $2.26$--$2.32$, while best validation loss worsens to $3.47$--$3.48$.
     \item Gate choice is negligible at WD 0.8: only $0.0033$ difference.
   \end{itemize}
 \end{frame}
 
 \begin{frame}{Scaling Curves}
-  \wandbplaceholder
-    {H100 validation loss or BPB by epoch, with epoch 13 highlighted}
-    {Overlay: baseline vryw9bxv; strong gate vp6dxkif; strong+low-WD 1l93yfpf; sigmoid+low-WD cy7besr1. Shade epochs 13--16 as the SWA/cosine-cycle phase.}
+  \begin{columns}[T,onlytextwidth]
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/h100_train.png}
+    \column{0.495\textwidth}
+      \includegraphics[width=\linewidth]{figures/graphs/h100_val.png}
+  \end{columns}
+  \vspace{0.25cm}
+  \begin{center}
+    \small Low-WD runs reach lower training loss, but validation loss turns upward:
+    the scaling result is overfitting, not better generalization.
+  \end{center}
 \end{frame}
 
 \begin{frame}{Weight Decay and SWA}
