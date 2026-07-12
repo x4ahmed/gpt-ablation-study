@@ -1,0 +1,12 @@
+{
+  "matrix_lr": 0.024,
+  "scalar_lr": 0.15,
+  "embedding_lr": 0.09,
+  "unembedding_lr": 0.0006,
+  "lr_multiplier": 0.8,
+  "weight_decay": 0.2,
+  "num_epochs": 16,
+  "val_loss": 3.744531330309416,
+  "best_val_loss": 3.4836184853001644,
+  "wandb_url": "https://wandb.ai/i-learn/slowrun/runs/cy7besr1"
+}
