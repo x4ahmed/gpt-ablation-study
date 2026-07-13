@@ -35,3 +35,6 @@ presentation/resources/*.synctex.gz
 presentation/resources/*.fls
 presentation/resources/*.fdb_latexmk
 presentation/resources/*.pdf
+
+# Local rendering and visual QA outputs.
+/tmp/

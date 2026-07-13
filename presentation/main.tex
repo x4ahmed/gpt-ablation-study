@@ -130,29 +130,43 @@
 \end{frame}
 
 \begin{frame}{Problem Statement}
-  \begin{columns}[T,onlytextwidth]
-    \column{0.47\textwidth}
-      \begin{block}{NanoGPT Slowrun}
-        \begin{itemize}
-          \item 100M training tokens from FineWeb
-          \item held-out validation loss is the target
-          \item repeated epochs and strong regularization are allowed
-        \end{itemize}
-      \end{block}
-    \column{0.49\textwidth}
-      \begin{block}{Tiny Track used here}
-        \begin{itemize}                                 
-          \item approximately 300M-parameter GPT recipe
-          \item designed for a single 8$\times$H100 node
-          \item Muon, modern attention components, EMA, and SWA
-        \end{itemize}
-      \end{block}
+  \begin{center}
+    \large
+    \textcolor{hhublue}{With the training data fixed, how much can better training
+    methods improve generalization?}
+  \end{center}
+
+  \vfill
+  \begin{columns}[c,onlytextwidth]
+    \column{0.27\textwidth}
+      \centering
+      \textbf{Fixed dataset}\par
+      \vspace{0.15cm}
+      100M FineWeb tokens\par
+      same data for every run
+
+    \column{0.055\textwidth}
+      \centering
+      {\Large\color{hhublue}$\Longrightarrow$}
+
+    \column{0.31\textwidth}
+      \centering
+      \textbf{Spend compute on learning}\par
+      \vspace{0.15cm}
+      Revisit the fixed data and improve the optimizer, architecture, and regularization
+
+    \column{0.055\textwidth}
+      \centering
+      {\Large\color{hhublue}$\Longrightarrow$}
+
+    \column{0.27\textwidth}
+      \centering
+      \textbf{Measure generalization}\par
+      \vspace{0.15cm}
+      Lowest held-out validation loss wins
   \end{columns}
-  \vspace{0.35cm}
-  \begin{block}{How this project uses it}
-    The Tiny Track code is the experimental starting point. It is reduced to
-    laptop scale for screening, then selected findings are tested again on H100s.
-  \end{block}
+
+  \vfill
   \smallcite{Slowrun benchmark \cite{slowrun2026}; fixed-data pre-training \cite{kim2025infinite}}
 \end{frame}
 
@@ -224,29 +238,29 @@
 \end{frame}
 
 \begin{frame}{Architecture Components}
-  \begin{columns}[T]
-    \column{0.48\textwidth}
-      \textbf{Attention path}
-      \begin{itemize}
-        \item half-truncated RoPE
-        \item partial key offset
-        \item per-head output gate
-        \item causal local/global attention pattern
-      \end{itemize}
-    \column{0.48\textwidth}
-      \textbf{Cross-layer paths}
-      \begin{itemize}
-        \item standard residual connection
-        \item learnable U-Net skip weights
-        \item projected input $x_0$ injected into values
-        \item alternating value-residual layers
-      \end{itemize}
-  \end{columns}
-  \vspace{0.5cm}
-  \begin{block}{Ablation principle}
-    Remove or alter one component while holding the data, optimizer, schedule,
-    and evaluation pipeline fixed.
-  \end{block}
+  \small
+  \renewcommand{\arraystretch}{1.55}
+  \begin{tabular}{>{\bfseries\raggedright\arraybackslash}p{0.23\textwidth}
+                  >{\raggedright\arraybackslash}p{0.30\textwidth}
+                  >{\raggedright\arraybackslash}p{0.38\textwidth}}
+    \toprule
+    Mechanism & Main components & Why it matters \\
+    \midrule
+    Attention geometry
+      & Half-truncated RoPE, partial key offset, and SSSL windows
+      & Controls positional information and how much previous context each token can see. \\
+    Cross-layer routing
+      & Mirrored U-Net skips and alternating value residuals
+      & Preserves information from early representations as it moves through deeper layers. \\
+    Head control
+      & Input-dependent per-head attention gates
+      & Regulates how strongly each attention head contributes to the block output. \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.55cm}
+  \begin{center}
+    These mechanisms define the architecture variants tested later in Phase 3.
+  \end{center}
 \end{frame}
 
 \begin{frame}{Training Schedule}
@@ -274,17 +288,17 @@
   \end{block}
 \end{frame}
 
-\begin{frame}{Raw Validation Loss}
+\begin{frame}{Evaluation Metric}
   \small
-  At the end of epoch $e$, the current raw model weights are denoted by $\theta_e$;
-  $E=16$ denotes the final epoch.
+  The same validation calculation is applied to every model-weight candidate.
 
   \vspace{0.45cm}
   \textbf{1. Per-token negative log-likelihood}
   \[
     \mathrm{CE}_i(\theta_e)=-\log p_{\theta_e}(t_i\mid t_{<i})
   \]
-  The model is penalized when it assigns low probability to the observed next token $t_i$.
+  For each real token, measure how much probability the model assigned to the
+  correct next token. A confident correct prediction produces a small loss.
 
   \vspace{0.4cm}
   \textbf{2. Padding-masked mean}
@@ -294,44 +308,53 @@
     \mathcal{L}_{\mathrm{val}}(\theta_e)=
     \frac{\sum_i \mathrm{CE}_i(\theta_e)m_i}{\sum_i m_i}
   \]
-  Padding contributes neither loss nor token count; lower validation loss is better.
+  Ignore padding positions, then average over the real validation tokens.
+  Lower validation loss is better.
 
-  \vspace{0.35cm}
-  \begin{block}{Raw candidates}
-    The values $\mathcal{L}_{\mathrm{val}}(\theta_e)$ for epochs $e=1,\ldots,E$
-    are the raw candidates used on the next slide.
-  \end{block}
+  \vspace{0.3cm}
+  \begin{center}
+    Only the evaluated weights change on the next slide; this loss calculation stays fixed.
+  \end{center}
 \end{frame}
 
 \begin{frame}{Best Validation Loss}
   \small
-  \textbf{1. Final EMA candidate}
+  \textbf{1. Raw Val Loss}
+  \[
+    \mathcal{L}_{\mathrm{raw}}^{*}
+      =\min_{1\le e\le E}\mathcal{L}_{\mathrm{val}}(\theta_e),
+    \qquad E=16
+  \]
+  Evaluate raw weights after every epoch. Epoch 16 is the \emph{Final Val Loss};
+  the candidate above is the best raw value from epochs 1--16.
+
+  \vspace{0.1cm}
+  \textbf{2. EMA Val Loss}
   \[
     \bar\theta_s=\beta\bar\theta_{s-1}+(1-\beta)\theta_s,
     \qquad s=1,\ldots,S
   \]
-  Here $s$ indexes optimizer steps and $S$ is the final training step; evaluate
-  $\mathcal{L}_{\mathrm{val}}(\bar\theta_S)$ once after training.
+  Smooth the weights across optimizer steps, then evaluate $\bar\theta_S$ once after training.
 
-  \vspace{0.3cm}
-  \textbf{2. Last-four checkpoint-average candidate}
+  \vspace{0.1cm}
+  \textbf{3. Last-Four Checkpoint Average}
   \[
     \theta_{\mathrm{avg}}
-      =\sum_{j=1}^{4}\frac{j}{10}\,\theta_{E-4+j}
-      =\frac{1\theta_{E-3}+2\theta_{E-2}+3\theta_{E-1}+4\theta_E}{10}
+      =\frac{1\theta_{13}+2\theta_{14}+3\theta_{15}+4\theta_{16}}{10}
   \]
-  Thus the most recent raw checkpoint receives the largest weight.
+  Average epochs 13--16 with weights $1{:}2{:}3{:}4$, then evaluate once.
 
-  \vspace{0.3cm}
-  \textbf{3. Reported best validation loss}
-  \[
-    \mathcal{L}_{\mathrm{best}}=\min\!\left\{
-      \min_{1\le e\le E}\mathcal{L}_{\mathrm{val}}(\theta_e),
+  \vspace{0.1cm}
+  \begin{block}{Reported best validation loss}
+    \centering
+    \(\displaystyle
+      \mathcal{L}_{\mathrm{best}}=\min\!\left\{
+      \mathcal{L}_{\mathrm{raw}}^{*},
       \mathcal{L}_{\mathrm{val}}(\bar\theta_S),
       \mathcal{L}_{\mathrm{val}}(\theta_{\mathrm{avg}})
-    \right\}
-  \]
-  Report the minimum value together with its source: raw epoch, EMA, or checkpoint average.
+      \right\}
+    \)
+  \end{block}
 \end{frame}
 
 \begin{frame}{Ablation Study Outline}
@@ -433,20 +456,28 @@
 
 \begin{frame}{Hybrid Optimizer}
   \small
-  \begin{tabular}{p{0.29\textwidth}p{0.18\textwidth}p{0.18\textwidth}p{0.19\textwidth}}
-    \toprule
-    Parameter group & Optimizer & Base LR & LR at multiplier 0.8 \\
-    \midrule
-    Hidden matrices & Muon & 0.040 & 0.032 \\
-    Embeddings & AdamW & 0.150 & 0.120 \\
-    Scalar / gate parameters & AdamW & 0.250 & 0.200 \\
-    Unembedding head & AdamW & 0.001 & 0.0008 \\
-    \bottomrule
-  \end{tabular}
-  \vspace{0.6cm}
+  \begin{itemize}
+    \item The baseline uses a hybrid optimizer: Muon and AdamW are assigned by parameter type.
+  \end{itemize}
+  \vspace{0.25cm}
+  \begin{center}
+    \renewcommand{\arraystretch}{1.5}
+    \begin{tabular}{>{\raggedright\arraybackslash}p{0.52\textwidth}
+                    >{\raggedright\arraybackslash}p{0.27\textwidth}}
+      \toprule
+      \textbf{Parameter group} & \textbf{Optimizer} \\
+      \midrule
+      Hidden matrices & Muon \\
+      Embeddings & AdamW \\
+      Scalar and gate parameters & AdamW \\
+      Unembedding head & AdamW \\
+      \bottomrule
+    \end{tabular}
+  \end{center}
+  \vspace{0.4cm}
   \begin{block}{Fair optimizer comparison}
-    The AdamW-only variant keeps the architecture, data order, schedules,
-    evaluation, EMA, and SWA unchanged; only matrix-parameter optimization changes.
+    The AdamW-only variant keeps the model, data order, training schedule, and
+    evaluation fixed; only the optimizer assigned to hidden matrices changes.
   \end{block}
   \smallcite{AdamW \cite{loshchilov2019adamw}; Muon parameter grouping \cite{jordan2024muon}}
 \end{frame}
@@ -462,23 +493,17 @@
     AdamW only & 0.6 & 4.8975 & stable \\
     \bottomrule
   \end{tabular}
-  \vspace{0.6cm}
-  \begin{columns}[T]
-    \column{0.48\textwidth}
-      \textbf{Observed}
-      \begin{itemize}
-        \item high-LR AdamW produced NaNs
-        \item lowering LR restored stability
-        \item stable AdamW remained 0.135 loss worse
-      \end{itemize}
-    \column{0.48\textwidth}
-      \textbf{Careful interpretation}
-      \begin{itemize}
-        \item consistent with Muon's bounded update geometry
-        \item gradient/update norms were not logged
-        \item exact failure mechanism remains a hypothesis
-      \end{itemize}
-  \end{columns}
+  \par
+  \vspace{0.45cm}
+  \textbf{Observation and Interpretation}
+  \begin{itemize}
+    \item AdamW at LR multiplier 0.8 developed loss spikes and then NaNs at step 1,626,
+      a pattern consistent with exploding gradients.
+    \item Reducing the multiplier to 0.6 completed all 16 epochs, supporting an
+      LR-dependent stability issue, although its best loss remained 0.135 worse.
+    \item Because gradient and update norms were not logged, the exact failure
+      mechanism remains a hypothesis.
+  \end{itemize}
 \end{frame}
 
 \begin{frame}{Optimizer Training Curves}
@@ -710,47 +735,24 @@
   \end{center}
 \end{frame}
 
-\begin{frame}{Weight Decay and SWA}
-  \begin{columns}[T]
-    \column{0.48\textwidth}
-      \textbf{WD 0.8 runs}
-      \begin{itemize}
-        \item raw loss continues to improve late
-        \item checkpoint averaging gives the best result
-        \item final best loss near 3.33
-      \end{itemize}
-    \column{0.48\textwidth}
-      \textbf{WD 0.2 runs}
-      \begin{itemize}
-        \item best raw checkpoint occurs at epoch 8
-        \item validation loss worsens in epochs 13--16
-        \item EMA and averaging inherit worse late weights
-      \end{itemize}
-  \end{columns}
-  \vspace{0.5cm}
-  \begin{block}{Supported conclusion}
-    Low initial WD is incompatible with this scaled recipe and late-training
-    schedule. A WD-only $\times$ SWA on/off factorial experiment is still needed
-    to isolate the mechanism.
-  \end{block}
-\end{frame}
-
 \begin{frame}
   \sectiondivider{Conclusion}
 \end{frame}
 
-\begin{frame}{Training Experience}
+\begin{frame}{Experiment Results}
   \begin{itemize}
-    \item AdamW at matrix LR 0.032 diverged; LR 0.024 completed training.
-    \item Muon added Newton--Schulz compute but achieved the best small-scale loss.
-    \item Laptop runs required gradient accumulation and disabled \texttt{torch.compile}.
-    \item Peak laptop VRAM stayed near 4.7GB; a 16-layer model required H100 scaling.
-    \item Raw, EMA, and averaged checkpoints can rank configurations differently.
-    \item W\&B logs, terminal logs, JSON summaries, checkpoints, and run scripts are retained.
+    \item \textbf{Optimizer stability:} AdamW showed likely exploding gradients
+      at LR 0.8; LR 0.6 was stable.
+    \item \textbf{Overfitting:} WD 0.2 lowered training loss but worsened H100
+      validation loss.
+    \item \textbf{Compatibility:} low initial WD is incompatible with the
+      baseline's late WD ramp and checkpoint averaging.
+    \item \textbf{Reproducibility:} code, configurations, and result summaries
+      are publicly available.\newline
+      \href{https://github.com/x4ahmed/gpt-ablation-study}{\texttt{x4ahmed/gpt-ablation-study}}
+    \item \textbf{Tiny Track reproduction:} H100 baseline 3.3343 vs. the
+      clone-time record 3.332 (difference: 0.0023).
   \end{itemize}
-  \vspace{0.4cm}
-  Reproduction quality is part of the result: each table entry can be traced to
-  a stored artifact or W\&B run.
 \end{frame}
 
 \begin{frame}{Training Across All Runs}
