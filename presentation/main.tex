@@ -211,20 +211,20 @@
 % -----------------------------------------------------------------------------
 \begin{frame}{Baseline Architecture}
   \small
-  \begin{tabular}{>{\bfseries}p{0.22\textwidth}p{0.70\textwidth}}
+  \begin{tabular}{>{\bfseries\raggedright\arraybackslash}p{0.22\textwidth}>{\raggedright\arraybackslash}p{0.70\textwidth}}
     \toprule
     Component & Recipe used in this study \\
     \midrule
-    Backbone & Decoder-only Transformer with causal self-attention \cite{vaswani2017attention} \\
-    Position & Half-truncated rotary embeddings; partial key offset \cite{su2021roformer} \\
-    Information paths & Residual stream, U-Net skips, gated value residuals \cite{zhou2024resformer} \\
+    Backbone & Decoder-only causal Transformer \cite{vaswani2017attention} \\
+    Position & Half-truncated RoPE + partial key offset \cite{su2021roformer} \\
+    Information paths & Residual stream + mirrored U-Net skips + gated value residuals \cite{zhou2024resformer} \\
     Head control & Learnable per-head attention gate \\
-    Optimizer & Muon for matrix parameters; AdamW for embeddings and scalars \\
-    Late training & EMA plus four-epoch checkpoint averaging / SWA \cite{izmailov2018swa} \\
-    Data & GPT-2 tokenizer; FineWeb training and held-out validation tokens \\
+    Optimizer & Muon: hidden 2D matrices; AdamW: embeddings and scalars \\
+    Late training & EMA + last-four checkpoint average \cite{izmailov2018swa} \\
+    Data & GPT-2 tokenizer; FineWeb train and held-out validation tokens \\
     \bottomrule
   \end{tabular}
-  \vspace{0.4cm}
+  \vspace{0.3cm}
   \begin{center}
     Our contribution is a controlled ablation and scale-transfer study of this recipe.
   \end{center}
@@ -515,7 +515,7 @@
   \end{columns}
   \vspace{0.25cm}
   \begin{center}
-    \small AdamW at LR multiplier 0.8 stops at step 1,626 after producing NaNs;
+    \small AdamW at LR multiplier 0.8 diverges at step 1,626 after producing NaNs;
     Muon remains stable through training.
   \end{center}
 \end{frame}
@@ -566,50 +566,34 @@
 \end{frame}
 
 \begin{frame}{Architecture Changes}
-  \footnotesize
-  \textbf{Attention gate.}
-  Baseline uses a sigmoid multiplier; strong gate doubles its range; no gate removes it.
-  \makebox[\textwidth][c]{\(
-    y_h'=\sigma(a_h(x))y_h
-    \quad\longrightarrow\quad
-    2\sigma(a_h(x))y_h
-    \quad\text{or}\quad y_h
-  \)}
-  \vspace{0.08cm}\hrule\vspace{0.10cm}
-
-  \textbf{Mirrored U-Net skips.}
-  A decoder layer adds its matching encoder state; no-skip removes that term.
-  \makebox[\textwidth][c]{\(
-    x_\ell \leftarrow x_\ell+s_\ell x_{L-1-\ell}
-    \quad\longrightarrow\quad x_\ell
-  \)}
-  \vspace{0.08cm}\hrule\vspace{0.10cm}
-
-  \textbf{Value residuals.}
-  Alternating layers inject a gated projection of $x_0$; no-value-residual keeps only $X_\ell W_\ell^V$.
-  \makebox[\textwidth][c]{\(
-    \widetilde V_\ell=X_\ell W_\ell^V
-      +2\sigma(g_\ell(X_\ell))\odot P_\ell(x_0)
-    \quad\longrightarrow\quad X_\ell W_\ell^V
-  \)}
-  \vspace{0.08cm}\hrule\vspace{0.10cm}
-
-  \textbf{RoPE coverage.}
-  Half RoPE rotates half of each $Q/K$ head; full RoPE rotates every head dimension.
-  \makebox[\textwidth][c]{\(
-    \operatorname{RoPE}_{1:d_h/2}(Q,K)
-    \quad\longrightarrow\quad
-    \operatorname{RoPE}_{1:d_h}(Q,K)
-  \)}
-  \vspace{0.08cm}\hrule\vspace{0.10cm}
-
-  \textbf{Partial key offset.}
-  Long-window and final layers shift the stationary key half by one token; no-offset leaves it unchanged.
-  \makebox[\textwidth][c]{\(
-    K_{t,\,d_h/2:d_h}\leftarrow K_{t-1,\,d_h/2:d_h}
-    \quad\longrightarrow\quad K_t
-  \)}
-  \vspace{0.04cm}
+  \small
+  \begingroup
+  \renewcommand{\arraystretch}{1.55}
+  \begin{tabular}{@{}>{\bfseries\raggedright\arraybackslash}p{0.19\textwidth}
+                    >{\raggedright\arraybackslash}p{0.34\textwidth}
+                    >{\raggedright\arraybackslash}p{0.35\textwidth}@{}}
+    \toprule
+    Component & Baseline & Tested change \\
+    \midrule
+    Attention gate
+      & $\sigma(a_h(x))y_h$
+      & Strong gate: $2\sigma(a_h(x))y_h$\newline Gate removed: $y_h$ \\
+    Mirrored U-Net skips
+      & $x_\ell+s_\ell x_{L-1-\ell}$
+      & $x_\ell$ (No U-Net skips) \\
+    Value residuals
+      & $X_\ell W_\ell^V+2\sigma(g_\ell)\odot P_\ell(x_0)$
+      & $X_\ell W_\ell^V$ only \\
+    RoPE coverage
+      & Half of each $Q/K$ head rotated
+      & All $Q/K$ dimensions rotated \\
+    Partial key offset
+      & Second key half shifted by one token
+      & No key shift \\
+    \bottomrule
+  \end{tabular}
+  \endgroup
+  \vfill
   \smallcite{RoPE \cite{su2021roformer}; value residuals \cite{zhou2024resformer}}
 \end{frame}
 
@@ -635,6 +619,8 @@
       removes 524,800 parameters.
     \item With key offset disabled in both runs, full RoPE is only $0.0070$
       better than half RoPE; one seed cannot resolve this gap.
+    \item Strong gate was selected as the scaling candidate because it expands
+      the gate multiplier.
   \end{itemize}
 \end{frame}
 
@@ -713,10 +699,9 @@
   \end{tabular}
   \vspace{0.4cm}
   \begin{itemize}
-    \item Both controlled pairs reverse the small-scale result: low WD worsens
-      validation loss by $0.136$--$0.149$.
-    \item Low WD clearly causes overfitting: final train loss falls to
-      $2.26$--$2.32$, while best validation loss worsens to $3.47$--$3.48$.
+    \item Both controlled pairs reverse the small-scale result.
+    \item Low WD clearly causes overfitting: final train loss falls, 
+    while best validation loss worsens.
     \item Gate choice is negligible at WD 0.8: only $0.0033$ difference.
   \end{itemize}
 \end{frame}
@@ -745,13 +730,15 @@
       at LR 0.8; LR 0.6 was stable.
     \item \textbf{Overfitting:} WD 0.2 lowered training loss but worsened H100
       validation loss.
-    \item \textbf{Compatibility:} low initial WD is incompatible with the
-      baseline's late WD ramp and checkpoint averaging.
+    \item \textbf{Compatibility:} low initial WD underperformed with the
+      baseline's training schedule.
     \item \textbf{Reproducibility:} code, configurations, and result summaries
       are publicly available.\newline
-      \href{https://github.com/x4ahmed/gpt-ablation-study}{\texttt{x4ahmed/gpt-ablation-study}}
+      \href{https://github.com/x4ahmed/gpt-ablation-study}{\texttt{GitHub: x4ahmed/gpt-ablation-study}}
+      \hspace{0.6cm}
+      \href{https://wandb.ai/i-learn/slowrun}{\texttt{W\&B: i-learn/slowrun}}
     \item \textbf{Tiny Track reproduction:} H100 baseline 3.3343 vs. the
-      clone-time record 3.332 (difference: 0.0023).
+      world record 3.332 (difference: 0.0023).
   \end{itemize}
 \end{frame}
 
@@ -765,8 +752,7 @@
   \vspace{0.25cm}
   \begin{center}
     \small All recorded training and validation trajectories, grouped by
-    experiment family. Different scales and run lengths should not be compared
-    as a single controlled ablation.
+    experiment family.
   \end{center}
 \end{frame}
 
@@ -778,9 +764,6 @@
     \midrule
     One seed per setting & no empirical variance; sub-percent gaps may be noise \\
     Scale changes together & model, data, batch, hardware, and kernels are not isolated \\
-    RoPE evidence & controlled no-offset comparison differs by only 0.0070;
-      one seed cannot resolve it \\
-    Value-residual ablation & removes both a path and 0.8\% of parameters \\
     Checkpoint selection & best across raw/EMA/average is optimistically selected \\
     \bottomrule
   \end{tabular}
@@ -791,26 +774,34 @@
 \end{frame}
 
 \begin{frame}{Take-Home Message}
-  \begin{enumerate}
-    \item \textbf{Muon was the strongest optimizer tested.} It tolerated the
-      aggressive matrix LR and beat stable AdamW at small scale.
-    \item \textbf{Most architectural tweaks were minor.} Value residuals produced
-      the largest observed architecture signal, with a parameter-count confound.
-    \item \textbf{Small-scale tuning did not reliably transfer.} WD 0.2 improved
-      laptop-scale loss by 6.3\% but degraded a controlled H100 pair by about 4\%.
-    \item \textbf{Schedules must be studied as systems.} Weight decay, LR cycling,
-      EMA, and checkpoint averaging interact late in training.
-  \end{enumerate}
-  \vspace{0.5cm}
   \begin{center}
-    \Large Cheap ablations generate hypotheses; scaling experiments decide which survive.
+    \Large How should this experiment be extended?
   \end{center}
+  \vspace{0.8cm}
+  \begin{columns}[T]
+    \column{0.30\textwidth}
+      \centering
+      \textbf{Replicate}\par
+      \vspace{0.2cm}
+      Repeat the key optimizer and architecture comparisons across multiple seeds.
+    \column{0.30\textwidth}
+      \centering
+      \textbf{Diagnose}\par
+      \vspace{0.2cm}
+      Track gradient and update norms; sweep weight decay jointly with LR and schedule.
+    \column{0.30\textwidth}
+      \centering
+      \textbf{Scale}\par
+      \vspace{0.2cm}
+      Hold other factors fixed and validate selected recipes at the 317M scale.
+  \end{columns}
 \end{frame}
 
 \begin{frame}[allowframebreaks]{References}
   \scriptsize
+  \setbeamertemplate{bibliography item}[text]
   \bibliography{references}
-  \bibliographystyle{apalike}
+  \bibliographystyle{unsrt}
 \end{frame}
 
 \end{document}
