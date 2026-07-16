@@ -27,6 +27,7 @@ presentation/*
 !presentation/resources/**
 
 # Keep resource sources and notes, but do not track generated LaTeX outputs.
+presentation/resources/seminar-concept-notes.*
 presentation/resources/*.aux
 presentation/resources/*.log
 presentation/resources/*.out
