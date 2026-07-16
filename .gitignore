@@ -19,6 +19,7 @@ presentation/*
 !presentation/*.tex
 !presentation/*.bib
 !presentation/rules.pdf
+!presentation/gpt-slowrun-ahmed-moustafa.pdf
 !presentation/figures/
 !presentation/figures/**
 !presentation/tables/
